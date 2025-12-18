@@ -41,11 +41,13 @@ if "current_step" not in st.session_state:
     st.session_state.current_step = "design"
 
 # LLMBrain: Always use latest selector
-st.session_state.brain = LLMBrain(
-    model=st.session_state.get("model_name", "llama3-8b-8192"),
-    mode=st.session_state.get("model_mode", "API (Groq)"),
-    api_key=st.session_state.get("api_key")
-)
+if "brain" not in st.session_state:
+    st.session_state.brain = LLMBrain(
+        model=st.session_state.get("model_name", "llama-3.1-8b-instant"),
+        mode=st.session_state.get("model_mode", "API (Groq)"),
+        api_key=st.session_state.get("api_key")
+    )
+
 print("Groq API Key:", st.session_state.get("api_key"))
 # DEBUG: Show model in use
 st.sidebar.markdown(f"**🧠 Model:** `{st.session_state.get('model_name')}`")
@@ -152,23 +154,49 @@ if st.session_state.test_plan or st.session_state.accepted_tests:
         st.session_state.plan_locked = True
         st.session_state.test_plan = st.session_state.accepted_tests.copy()
         st.rerun()
+        st.session_state.current_step = "data"
+
+
+def is_valid_python(code: str) -> bool:
+    try:
+        compile(code, "<generated_test>", "exec")
+        return True
+    except SyntaxError:
+        return False
 
 # -------------------------------------------------
 # STEP 4: DATA ENTRY
 # -------------------------------------------------
 if st.session_state.plan_locked:
+    # Find tests that actually need user input
+    tests_needing_data = [
+        t for t in st.session_state.test_plan
+        if t.get("missing_data")
+    ]
+
+    # If NO test needs data → skip step 4 entirely
+    if not tests_needing_data:
+        st.session_state.approved_tests = st.session_state.test_plan
+        st.session_state.current_step = "code"
+        st.rerun()
+
     st.divider()
     st.subheader("4. Fill Required Test Data")
 
     with st.form("data_entry_form"):
         approved_tests = []
+
         for i, test in enumerate(st.session_state.test_plan):
             st.markdown(f"**Test {i+1}: {test['name']}**")
+
             user_data = {}
+
             for field in test.get("missing_data", []):
-                val = st.text_input(f"{field} (Test {i+1})", key=f"data_{i}_{field}")
-                if val:
-                    user_data[field] = val
+                label = field.replace("_", " ").title()
+                val = st.text_input(label, key=f"data_{i}_{field}")
+                if val.strip():
+                    user_data[field] = val.strip()
+
             test["user_data"] = user_data
             approved_tests.append(test)
             st.markdown("---")

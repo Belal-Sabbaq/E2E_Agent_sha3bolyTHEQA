@@ -1,8 +1,13 @@
 import json
 import time
 import requests
+import re
+
 
 class LLMBrain:
+    # --------------------------------------------------
+    # INIT
+    # --------------------------------------------------
     def __init__(self, model="llama-3.1-8b-instant", mode="Local (Ollama)", api_key=None):
         self.model = model
         self.mode = mode
@@ -12,14 +17,28 @@ class LLMBrain:
         if self.mode == "API (Groq)" and not api_key:
             raise ValueError("Groq API key is required for API (Groq) mode")
 
-    def chat(self, system_prompt, user_prompt, response_format="text", temperature=0.1):
-        import time
-        import requests
+    # --------------------------------------------------
+    # INTERNAL: SAFE JSON EXTRACTION
+    # --------------------------------------------------
+    def _extract_json_array(self, text: str) -> str:
+        """
+        Extract the first JSON array from LLM output.
+        Guards against explanations or extra text.
+        """
+        match = re.search(r"\[\s*{.*}\s*\]", text, re.DOTALL)
+        if not match:
+            raise ValueError("No valid JSON array found in LLM output")
+        return match.group(0)
 
+    # --------------------------------------------------
+    # CORE CHAT METHOD
+    # --------------------------------------------------
+    def chat(self, system_prompt, user_prompt, response_format="text", temperature=0.1):
         start_time = time.time()
         tokens_used = 0
         model_used = self.model
-        print("🔥 FINAL MODEL SENT TO GROQ:", repr(self.model))
+
+        print("🔥 FINAL MODEL SENT TO LLM:", repr(self.model))
 
         try:
             # ===============================
@@ -34,13 +53,12 @@ class LLMBrain:
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
                     ],
-                    format="json" if response_format == "json" else None,
-                    options={"temperature": temperature}
+                    options={"temperature": float(temperature)}
                 )
                 content = response["message"]["content"]
 
             # ===============================
-            # GROQ API (via HTTP)
+            # GROQ API
             # ===============================
             elif self.mode == "API (Groq)":
                 print("🌐 Sending request to Groq API...")
@@ -55,41 +73,33 @@ class LLMBrain:
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
                     ],
-                    "temperature": temperature,
+                    "temperature": float(temperature),
                     "max_tokens": 1024
                 }
-
-                import requests
-                import json
 
                 response = requests.post(url, headers=headers, json=payload)
 
                 if response.status_code != 200:
                     print("❌ STATUS:", response.status_code)
-                    print("❌ RESPONSE HEADERS:", response.headers)
-                    print("❌ RESPONSE BODY:", response.text)
+                    print("❌ BODY:", response.text)
                     raise RuntimeError("Groq request failed")
 
                 data = response.json()
-
                 content = data["choices"][0]["message"]["content"]
                 tokens_used = data.get("usage", {}).get("total_tokens", 0)
 
-            # ===============================
-            # UNSUPPORTED MODE
-            # ===============================
             else:
-                raise Exception(f"Unsupported mode: {self.mode}")
+                raise ValueError(f"Unsupported mode: {self.mode}")
 
             # ===============================
-            # METRICS LOGGING
+            # METRICS (SUCCESS)
             # ===============================
             elapsed = time.time() - start_time
             self.metrics.append({
                 "model": model_used,
+                "mode": self.mode,
                 "time": elapsed,
-                "tokens": tokens_used,
-                "mode": self.mode
+                "tokens": tokens_used
             })
 
             return content
@@ -98,98 +108,103 @@ class LLMBrain:
             elapsed = time.time() - start_time
             self.metrics.append({
                 "model": model_used,
+                "mode": self.mode,
                 "time": elapsed,
                 "tokens": 0,
-                "error": str(e),
-                "mode": self.mode
+                "error": str(e)
             })
             print("❌ LLM ERROR:", e)
-            raise e
+            raise
 
-
-        # --------------------------------------------------
-        # TEST PLAN GENERATION
-        # --------------------------------------------------
+    # --------------------------------------------------
+    # TEST PLAN GENERATION
+    # --------------------------------------------------
     def generate_test_plan(self, scraped_data, memory_context=None):
-            elements = scraped_data.get("elements", [])
-            clean_dom = scraped_data.get("cleaned_dom", "")[:10000]
+        elements = scraped_data.get("elements", [])
+        clean_dom = scraped_data.get("cleaned_dom", "")[:10000]
 
-            memory_prompt = ""
-            if memory_context:
-                if memory_context.get("avoid"):
-                    memory_prompt += "\n\n🚫 THINGS TO AVOID:\n" + "\n".join(memory_context["avoid"])
-                if memory_context.get("emulate"):
-                    memory_prompt += "\n\n✅ PATTERNS TO FOLLOW:\n" + "\n".join(memory_context["emulate"])
+        memory_prompt = ""
+        if memory_context:
+            if memory_context.get("avoid"):
+                memory_prompt += "\n\n🚫 THINGS TO AVOID:\n" + "\n".join(memory_context["avoid"])
+            if memory_context.get("emulate"):
+                memory_prompt += "\n\n✅ PATTERNS TO FOLLOW:\n" + "\n".join(memory_context["emulate"])
 
-            system_prompt = f"""
-    You are an expert QA Automation Engineer.
+        system_prompt = f"""
+You are an expert QA Automation Engineer.
 
-    Generate 3–5 Playwright test cases.
+Generate 3–5 Playwright test cases.
 
-    STRICT OUTPUT RULES:
-    - Return ONLY a valid JSON LIST
-    - No markdown
-    - No explanations
-    - No wrapping keys
+STRICT OUTPUT RULES:
+- Return ONLY a valid JSON array
+- The response MUST start with '[' and end with ']'
+- No markdown
+- No explanations
+- No trailing commas
 
-    FORMAT:
-    [
-    {{
-        "name": "...",
-        "description": "...",
-        "missing_data": [],
-        "requires_auth": false
-    }}
-    ]
+FORMAT:
+[
+  {{
+    "name": "...",
+    "description": "...",
+    "missing_data": [],
+    "requires_auth": false
+  }}
+]
 
-    {memory_prompt}
-    """
+{memory_prompt}
+"""
 
-            user_prompt = f"""
-    Page Title: {scraped_data.get('title')}
-    Elements: {json.dumps(elements[:50])}
-    DOM: {clean_dom}
-    """
+        user_prompt = f"""
+Page Title: {scraped_data.get('title')}
+Elements: {json.dumps(elements[:50])}
+DOM: {clean_dom}
+"""
 
-            print("🧠 Brain is thinking...")
+        print("🧠 Generating test plan...")
 
-            try:
-                content = self.chat(system_prompt, user_prompt, response_format="json")
+        try:
+            content = self.chat(system_prompt, user_prompt)
 
-                if not content or not isinstance(content, str):
-                    raise ValueError("Empty LLM response")
+            if not content or not isinstance(content, str):
+                raise ValueError("Empty LLM response")
 
-                if "```" in content:
-                    content = content.replace("```json", "").replace("```", "").strip()
+            content = content.replace("```json", "").replace("```", "").strip()
 
-                parsed_json = json.loads(content)
+            json_text = self._extract_json_array(content)
+            parsed_json = json.loads(json_text)
 
-                if not isinstance(parsed_json, list):
-                    raise ValueError("LLM did not return a JSON list")
+            if not isinstance(parsed_json, list):
+                raise ValueError("LLM did not return a JSON list")
 
-                safe_plan = []
-                for item in parsed_json:
-                    if isinstance(item, dict):
+            safe_plan = []
+            seen = set()
+
+            for item in parsed_json:
+                if isinstance(item, dict):
+                    name = item.get("name", "").strip()
+                    if name and name not in seen:
+                        seen.add(name)
                         safe_plan.append({
-                            "name": item.get("name", "Unnamed Test"),
+                            "name": name,
                             "description": item.get("description", ""),
                             "missing_data": item.get("missing_data", []),
                             "requires_auth": item.get("requires_auth", False)
                         })
 
-                return safe_plan
+            return safe_plan
 
-            except Exception as e:
-                print("❌ LLM ERROR:", e)
-                return [{
-                    "name": "Error Generating Plan",
-                    "description": str(e),
-                    "missing_data": [],
-                    "is_error": True
-                }]
+        except Exception as e:
+            print("❌ LLM ERROR:", e)
+            return [{
+                "name": "Error Generating Plan",
+                "description": str(e),
+                "missing_data": [],
+                "is_error": True
+            }]
 
     # --------------------------------------------------
-    # CODE GENERATION
+    # PLAYWRIGHT CODE GENERATION
     # --------------------------------------------------
     def generate_playwright_code(self, test_case, scraped_data):
         elements = scraped_data.get("elements", [])
@@ -198,87 +213,55 @@ class LLMBrain:
         system_prompt = """
 You are an expert Playwright Automation Engineer (Python).
 
-Write a complete standalone script.
+CRITICAL RULES:
+- Output ONLY valid Python code
+- No explanations
+- No markdown
+- No backticks
+- Code must be directly executable
 
-RULES:
+TECHNICAL REQUIREMENTS:
 - Use: from playwright.sync_api import sync_playwright
-- Use resilient locators
-- Save storage state to auth.json
+- Define a main() function
+- Launch Chromium
+- Open the provided URL
+- Perform the test
+- Close the browser properly
 """
 
         user_prompt = f"""
-Test Name: {test_case['name']}
-Description: {test_case['description']}
+TEST_NAME: {test_case['name']}
+DESCRIPTION: {test_case['description']}
 URL: {scraped_data.get('url')}
-Elements: {json.dumps(elements[:50])}
+ELEMENTS: {json.dumps(elements[:50])}
 USER_DATA: {json.dumps(user_data)}
 """
 
         try:
             code = self.chat(system_prompt, user_prompt)
-            if "```" in code:
-                code = code.replace("```python", "").replace("```", "")
-            return code.strip()
+
+            code = code.replace("```python", "").replace("```", "").strip()
+
+            # HARD PYTHON VALIDATION
+            compile(code, "<generated_playwright_test>", "exec")
+
+            return code
+
         except Exception as e:
-            return f"# Error generating code: {e}"
+            return (
+                "# GENERATED CODE REJECTED\n"
+                f"# Reason: {e}\n"
+            )
 
     # --------------------------------------------------
-    # SELF-HEALING
-    # --------------------------------------------------
-    def fix_generated_code(self, broken_code, error_log):
-        system_prompt = """
-You are a Python Playwright debugger.
-Fix the script based on the error trace.
-Return ONLY Python code.
-"""
-        user_prompt = f"""
-BROKEN CODE:
-{broken_code}
-
-ERROR TRACE:
-{error_log}
-"""
-        try:
-            code = self.chat(system_prompt, user_prompt)
-            if "```" in code:
-                code = code.replace("```python", "").replace("```", "")
-            return code.strip()
-        except Exception as e:
-            return f"# Fix failed: {e}"
-
-    # --------------------------------------------------
-    # PLAN REFINEMENT
-    # --------------------------------------------------
-    def refine_test_plan(self, current_plan, user_feedback, scraped_data):
-        elements = scraped_data.get("elements", [])
-
-        system_prompt = """
-Modify the existing test plan based on user feedback.
-Return ONLY a JSON list.
-"""
-
-        user_prompt = f"""
-Current Plan: {json.dumps(current_plan)}
-Feedback: {user_feedback}
-Elements: {json.dumps(elements[:50])}
-"""
-
-        try:
-            content = self.chat(system_prompt, user_prompt, response_format="json", temperature=0.2)
-            parsed = json.loads(content)
-            return parsed if isinstance(parsed, list) else []
-        except Exception as e:
-            return [{"name": "Error Refining Plan", "description": str(e), "is_error": True}]
-
-    # --------------------------------------------------
-    # METRICS / OBSERVABILITY
+    # METRICS SUMMARY
     # --------------------------------------------------
     def get_metrics_summary(self):
         if not self.metrics:
             return {
                 "total_calls": 0,
                 "total_tokens": 0,
-                "average_time": 0,
+                "average_time": 0.0,
                 "errors": 0,
                 "per_model": {}
             }
@@ -287,24 +270,28 @@ Elements: {json.dumps(elements[:50])}
         total_tokens = sum(m.get("tokens", 0) for m in self.metrics)
         errors = sum(1 for m in self.metrics if "error" in m)
 
-        model_breakdown = {}
+        per_model = {}
         for m in self.metrics:
             key = f"{m['mode']} / {m['model']}"
-            if key not in model_breakdown:
-                model_breakdown[key] = {"count": 0, "total_time": 0, "total_tokens": 0, "errors": 0}
-            model_breakdown[key]["count"] += 1
-            model_breakdown[key]["total_time"] += m["time"]
-            model_breakdown[key]["total_tokens"] += m.get("tokens", 0)
+            stats = per_model.setdefault(
+                key, {"count": 0, "total_time": 0.0, "total_tokens": 0, "errors": 0}
+            )
+            stats["count"] += 1
+            stats["total_time"] += m["time"]
+            stats["total_tokens"] += m.get("tokens", 0)
             if "error" in m:
-                model_breakdown[key]["errors"] += 1
+                stats["errors"] += 1
 
         return {
             "total_calls": len(self.metrics),
             "total_tokens": total_tokens,
             "average_time": total_time / len(self.metrics),
             "errors": errors,
-            "per_model": model_breakdown
+            "per_model": per_model
         }
 
+    # --------------------------------------------------
+    # RESET METRICS
+    # --------------------------------------------------
     def reset_metrics(self):
         self.metrics.clear()
