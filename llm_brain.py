@@ -1,285 +1,211 @@
-import ollama
 import json
-import re
+import openai
 
 class LLMBrain:
-    def __init__(self, model="llama3.2"): 
+    def __init__(self, model="qwen3:4b", mode="Local (Ollama)", api_key=None):
         self.model = model
+        self.mode = mode
+        self.api_key = api_key
+        if self.mode == "API (OpenAI)":
+            openai.api_key = self.api_key
 
-    def generate_test_plan(self, scraped_data,memory_context=None):
+    def chat(self, system_prompt, user_prompt, response_format="text", temperature=0.1):
+
+        if self.mode == "Local (Ollama)":
+            import ollama
+            print("🔧 Sending request to Ollama...")
+            print("MODEL:", self.model)
+            print("SYSTEM PROMPT:", system_prompt[:200])  # Print trimmed prompt
+            print("USER PROMPT:", user_prompt[:200])
+
+            response = ollama.chat(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                format="json" if response_format == "json" else None,
+                options={"temperature": temperature}
+            )
+            return response["message"]["content"]
+
+        elif self.mode == "API (OpenAI)":
+            import openai
+            from openai import OpenAI
+
+            ...
+
+            client = OpenAI(api_key=self.api_key)
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=temperature
+            )
+            return response.choices[0].message.content
+
+
+    # --------------------------------------------------
+    # TEST PLAN GENERATION
+    # --------------------------------------------------
+    def generate_test_plan(self, scraped_data, memory_context=None):
         elements = scraped_data.get("elements", [])
-        clean_dom = scraped_data.get("cleaned_dom", "")[:10000] 
-        # Construct the "Lessons Learned" string
+        clean_dom = scraped_data.get("cleaned_dom", "")[:10000]
+
         memory_prompt = ""
         if memory_context:
             if memory_context.get("avoid"):
-                memory_prompt += "\n\n🚫 THINGS TO AVOID (Based on past feedback):\n" + "\n".join(memory_context["avoid"])
+                memory_prompt += "\n\n🚫 THINGS TO AVOID:\n" + "\n".join(memory_context["avoid"])
             if memory_context.get("emulate"):
-                memory_prompt += "\n\n✅ PATTERNS TO FOLLOW (Accepted previously):\n" + "\n".join(memory_context["emulate"])
+                memory_prompt += "\n\n✅ PATTERNS TO FOLLOW:\n" + "\n".join(memory_context["emulate"])
+
         system_prompt = f"""
-        You are an expert QA Automation Engineer. 
-        Analyze the HTML and generate 3-5 Playwright test scenarios.
-        
-        CRITICAL RULES:
-        1. Output MUST be a valid JSON List of objects.
-        2. Format: [{{"name": "...", "description": "...", "missing_data": [], "requires_auth": false}}]
-        
-        DATA HANDLING RULES:
-        3. "missing_data" is for values the User must provide (e.g., valid_username).
-        4. NEGATIVE TESTING: If a test case requires a field to be EMPTY (e.g., "Login with empty password"), do NOT include that field in "missing_data".
-          - Correct: Name: "Empty Password", missing_data: ["username"] (Only ask for user, not password).
-          - Incorrect: Name: "Empty Password", missing_data: ["username", "password"].
-          
-        Lesson Learned: 
-        1. Output valid JSON list.
-        {memory_prompt}  <-- RAG INJECTION HERE
-        """
-        
+You are an expert QA Automation Engineer.
+
+Generate 3–5 Playwright test cases.
+
+STRICT OUTPUT RULES:
+- Return ONLY a valid JSON LIST
+- No markdown
+- No explanations
+- No wrapping keys
+
+FORMAT:
+[
+  {{
+    "name": "...",
+    "description": "...",
+    "missing_data": [],
+    "requires_auth": false
+  }}
+]
+
+{memory_prompt}
+"""
+
         user_prompt = f"""
-        **Page Title:** {scraped_data.get('title')}
-        **Elements:** {json.dumps(elements[:50])} 
-        **DOM:** {clean_dom}
-        """
+Page Title: {scraped_data.get('title')}
+Elements: {json.dumps(elements[:50])}
+DOM: {clean_dom}
+"""
 
         print("🧠 Brain is thinking...")
+
         try:
-            response = ollama.chat(
-                model=self.model, 
-                messages=[
-                    {'role': 'system', 'content': system_prompt},
-                    {'role': 'user', 'content': user_prompt},
-                ],
-                format='json',
-                options={'temperature': 0.1}
-            )
-            
-            content = response['message']['content']
-            print(f"DEBUG: Raw LLM Output: {content}") # Keep this for debugging
-            
+            content = self.chat(system_prompt, user_prompt, response_format="json")
+
+            if not content or not isinstance(content, str):
+                raise ValueError("Empty LLM response")
+
+            if "```" in content:
+                content = content.replace("```json", "").replace("```", "").strip()
+
             parsed_json = json.loads(content)
-            
-            # --- FIX: ROBUST LIST EXTRACTION ---
-            final_plan = []
-            
-            # Case 1: It's already a list (Perfect)
-            if isinstance(parsed_json, list):
-                final_plan = parsed_json
-                
-            # Case 2: It's a dict (The issue you faced)
-            elif isinstance(parsed_json, dict):
-                # Strategy: Look for ANY value that is a list
-                found_list = False
-                for key, value in parsed_json.items():
-                    if isinstance(value, list):
-                        final_plan = value
-                        found_list = True
-                        print(f"DEBUG: Extracted plan from key: '{key}'")
-                        break
-                
-                if not found_list:
-                    print("Error: JSON is a dict but contains no lists.")
-                    return [{"name": "Error", "description": "LLM returned invalid format (Dict with no list).", "is_error": True}]
-            
-            
-            # --- VALIDATION LOOP ---
-            # Ensure every item has the required fields
+
+            if not isinstance(parsed_json, list):
+                raise ValueError("LLM did not return a JSON list")
+
             safe_plan = []
-            for item in final_plan:
-                # specific check to ignore strings if LLM returns ["test1", "test2"]
+            for item in parsed_json:
                 if isinstance(item, dict):
-                    safe_item = {
-                        "name": item.get("name", item.get("test_name", "Unnamed Test")),
-                        "description": item.get("description", "No description."),
+                    safe_plan.append({
+                        "name": item.get("name", "Unnamed Test"),
+                        "description": item.get("description", ""),
                         "missing_data": item.get("missing_data", []),
                         "requires_auth": item.get("requires_auth", False)
-                    }
-                    safe_plan.append(safe_item)
-            
+                    })
+
             return safe_plan
-            
+
         except Exception as e:
-            print(f"LLM Error: {e}")
+            print("❌ LLM ERROR:", e)
             return [{
-                "name": "Error Generating Plan", 
-                "description": f"The LLM failed: {str(e)}", 
+                "name": "Error Generating Plan",
+                "description": str(e),
                 "missing_data": [],
                 "is_error": True
             }]
+
+    # --------------------------------------------------
+    # CODE GENERATION
+    # --------------------------------------------------
     def generate_playwright_code(self, test_case, scraped_data):
         elements = scraped_data.get("elements", [])
         user_data = test_case.get("user_data", {})
-        
+
         system_prompt = """
-        You are an expert Playwright Automation Engineer (Python).
-        Your task: Write a complete, standalone Python script.
-        
-        STRICT RULES:
-        1. IMPORTS: You MUST use exactly this import line: 
-           from playwright.sync_api import sync_playwright
-        2. LOCATORS: Use resilient locators: page.get_by_role(), page.get_by_placeholder().
-        3. DATA: Use the provided USER_DATA values.
-        4. STRUCTURE: 
-           - Define a run() function.
-           - Inside run(), use 'with sync_playwright() as p:'.
-           - Launch browser with headless=False.
-           - Inside run(), set 'page.set_default_timeout(5000)' (5 seconds).
-           - Call run() at the end under 'if __name__ == "__main__":'.
-        5. STATE MANAGEMENT (CRITICAL):
-           - At the end of the 'run()' function, BEFORE closing the browser:
-           - Save the storage state to 'auth.json'.
-           - Code: context.storage_state(path='auth.json')
-        6. OUTPUT: Return ONLY the Python code.
-        """
-        
+You are an expert Playwright Automation Engineer (Python).
+
+Write a complete standalone script.
+
+RULES:
+- Use: from playwright.sync_api import sync_playwright
+- Use resilient locators
+- Save storage state to auth.json
+"""
+
         user_prompt = f"""
-        **Test Case Name:** {test_case['name']}
-        **Description:** {test_case['description']}
-        **URL:** {scraped_data.get('url')}
-        **Available Elements:** {json.dumps(elements[:50])}
-        **USER_DATA (Inject these values):** {json.dumps(user_data)}
-        """
+Test Name: {test_case['name']}
+Description: {test_case['description']}
+URL: {scraped_data.get('url')}
+Elements: {json.dumps(elements[:50])}
+USER_DATA: {json.dumps(user_data)}
+"""
 
-        print(f"🧠 Generating code for: {test_case['name']}...")
-        
         try:
-            response = ollama.chat(
-                model=self.model, 
-                messages=[
-                    {'role': 'system', 'content': system_prompt},
-                    {'role': 'user', 'content': user_prompt},
-                ],
-                options={'temperature': 0.1} 
-            )
-            
-            # Clean up Markdown (```python ... ```)
-            code = response['message']['content']
-            if "```python" in code:
-                code = code.split("```python")[1].split("```")[0]
-            elif "```" in code:
-                code = code.split("```")[1].split("```")[0]
-                
+            code = self.chat(system_prompt, user_prompt)
+            if "```" in code:
+                code = code.replace("```python", "").replace("```", "")
             return code.strip()
-
         except Exception as e:
-            return f"# Error generating code: {str(e)}"
+            return f"# Error generating code: {e}"
+
+    # --------------------------------------------------
+    # SELF-HEALING
+    # --------------------------------------------------
     def fix_generated_code(self, broken_code, error_log):
-        """
-        Takes broken code and the error trace, then rewrites the code to fix it.
-        """
         system_prompt = """
-        You are an expert Python Debugger for Playwright scripts.
-        Your task is to FIX the provided code based on the error output.
-        
-        RULES:
-        1. Analyze the ERROR TRACE to find the root cause (e.g., missing import, wrong locator, indentation).
-        2. Retain the original logic and USER_DATA. Do not hallucinate new data.
-        3. If the error is 'ModuleNotFoundError', fix the import statements.
-           (Correct: from playwright.sync_api import sync_playwright)
-        4. Return ONLY the fixed, executable Python code. No markdown, no explanations.
-        """
-        
+You are a Python Playwright debugger.
+Fix the script based on the error trace.
+Return ONLY Python code.
+"""
         user_prompt = f"""
-        **BROKEN CODE:**
-        {broken_code}
-        
-        **ERROR TRACE:**
-        {error_log}
-        """
+BROKEN CODE:
+{broken_code}
 
-        print("🚑 Healer Agent is fixing the code...")
-        
+ERROR TRACE:
+{error_log}
+"""
         try:
-            response = ollama.chat(
-                model=self.model, 
-                messages=[
-                    {'role': 'system', 'content': system_prompt},
-                    {'role': 'user', 'content': user_prompt},
-                ],
-                options={'temperature': 0.1} # Low temp for precision
-            )
-            
-            # Clean up Markdown
-            code = response['message']['content']
-            if "```python" in code:
-                code = code.split("```python")[1].split("```")[0]
-            elif "```" in code:
-                code = code.split("```")[1].split("```")[0]
-                
+            code = self.chat(system_prompt, user_prompt)
+            if "```" in code:
+                code = code.replace("```python", "").replace("```", "")
             return code.strip()
-
         except Exception as e:
-            return f"# Fix failed: {str(e)}"
-          
-          
-          
+            return f"# Fix failed: {e}"
+
+    # --------------------------------------------------
+    # PLAN REFINEMENT
+    # --------------------------------------------------
     def refine_test_plan(self, current_plan, user_feedback, scraped_data):
-        """
-        Refines the existing test plan based on user critique.
-        """
         elements = scraped_data.get("elements", [])
-        clean_dom = scraped_data.get("cleaned_dom", "")[:10000]
-        
+
         system_prompt = """
-        You are an expert QA Automation Engineer.
-        Your task is to MODIFY the existing Test Plan based on User Feedback.
-        
-        RULES:
-        1. Keep existing tests unless the user asks to remove them.
-        2. Add new tests if requested.
-        3. Modify descriptions or names if requested.
-        4. Output MUST be a valid JSON List of objects (same format as before).
-        5. DATA HANDLING: For any new test, identify "missing_data" (e.g. ["username"]).
-        6. NEGATIVE TESTING: If the user asks for a negative test (e.g. empty fields), do not ask for that data in "missing_data".
-        """
-        
+Modify the existing test plan based on user feedback.
+Return ONLY a JSON list.
+"""
+
         user_prompt = f"""
-        **Current Test Plan:**
-        {json.dumps(current_plan)}
-        
-        **User Feedback/Instructions:**
-        "{user_feedback}"
-        
-        **Page Elements (Reference):**
-        {json.dumps(elements[:50])}
-        """
+Current Plan: {json.dumps(current_plan)}
+Feedback: {user_feedback}
+Elements: {json.dumps(elements[:50])}
+"""
 
-        print("🧠 Brain is refining the plan...")
         try:
-            response = ollama.chat(
-                model=self.model, 
-                messages=[
-                    {'role': 'system', 'content': system_prompt},
-                    {'role': 'user', 'content': user_prompt},
-                ],
-                format='json',
-                options={'temperature': 0.2}
-            )
-            
-            content = response['message']['content']
-            parsed_json = json.loads(content)
-            
-            # (Reuse your robust list extraction logic here)
-            final_plan = []
-            if isinstance(parsed_json, list):
-                final_plan = parsed_json
-            elif isinstance(parsed_json, dict):
-                for val in parsed_json.values():
-                    if isinstance(val, list):
-                        final_plan = val
-                        break
-            
-            # Validation Loop
-            safe_plan = []
-            for item in final_plan:
-                safe_item = {
-                    "name": item.get("name", "Unnamed Test"),
-                    "description": item.get("description", ""),
-                    "missing_data": item.get("missing_data", []),
-                    "requires_auth": item.get("requires_auth", False)
-                }
-                safe_plan.append(safe_item)
-                
-            return safe_plan
-
+            content = self.chat(system_prompt, user_prompt, response_format="json", temperature=0.2)
+            parsed = json.loads(content)
+            return parsed if isinstance(parsed, list) else []
         except Exception as e:
             return [{"name": "Error Refining Plan", "description": str(e), "is_error": True}]

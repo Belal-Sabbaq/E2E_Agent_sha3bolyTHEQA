@@ -88,7 +88,6 @@ class BrowserManager:
                     // Check if element is visible (has size and is not hidden)
                     const rect = el.getBoundingClientRect();
                     const isVisible = rect.width > 0 && rect.height > 0 && window.getComputedStyle(el).visibility !== 'hidden';
-                    
                     if (isVisible) {
                         interactables.push({
                             id: index,
