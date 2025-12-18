@@ -13,7 +13,13 @@ from ui_utils import config_model_selector
 # CONFIGURATION SECTION
 # -------------------------------------------------
 config_model_selector()  # This sets model_name, model_mode, and api_key
+# Then safely use:
+api_key = st.session_state.get("api_key")
+mode = st.session_state.get("model_mode")
 
+if mode == "API (OpenAI)" and not api_key:
+    st.error("❌ Please enter your OpenAI API key in the sidebar.")
+    st.stop()
 nest_asyncio.apply()
 st.set_page_config(layout="wide", page_title="AI QA Agent")
 
@@ -35,14 +41,42 @@ if "current_step" not in st.session_state:
 
 # LLMBrain: Always use latest selector
 st.session_state.brain = LLMBrain(
-    model=st.session_state.get("model_name", "qwen3:4b"),
-    mode=st.session_state.get("model_mode", "Local (Ollama)"),
-    api_key=st.session_state.get("api_key")
+    model=st.session_state.get("model_name", "gpt-4o"),
+    mode=st.session_state.get("model_mode", "API (OpenAI)"),
+    api_key=st.session_state.get("api_key")  # ← this must NOT be None!
 )
+
 
 # DEBUG: Show model in use
 st.sidebar.markdown(f"**🧠 Model:** `{st.session_state.get('model_name')}`")
 st.sidebar.markdown(f"**⚙️ Mode:** `{st.session_state.get('model_mode')}`")
+
+with st.sidebar:
+    st.header("System Metrics")
+
+    brain = st.session_state.brain
+    metrics = brain.get_metrics_summary()
+
+    st.metric("LLM Calls", metrics["total_calls"])
+    st.metric("Total Tokens", metrics["total_tokens"])
+    st.metric("Avg Response Time", f"{metrics['average_time']:.2f}s")
+    st.metric("Errors", metrics["errors"])
+
+    st.markdown("#### Per Model Stats")
+    for model_key, stats in metrics["per_model"].items():
+        st.markdown(f"**{model_key}**")
+        st.write(f"Requests: {stats['count']}")
+        st.write(f"Tokens: {stats['total_tokens']}")
+        st.write(f"Avg Time: {stats['total_time'] / stats['count']:.2f}s")
+        st.write(f"Errors: {stats['errors']}")
+        st.markdown("---")
+
+    if st.button("🔄 Reset Metrics"):
+        brain.reset_metrics()
+        st.success("Metrics reset.")
+        st.rerun()
+
+
 
 # -------------------------------------------------
 # UI LAYOUT & FLOW

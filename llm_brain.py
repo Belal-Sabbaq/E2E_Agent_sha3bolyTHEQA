@@ -1,50 +1,99 @@
 import json
 import openai
+import time
 
 class LLMBrain:
     def __init__(self, model="qwen3:4b", mode="Local (Ollama)", api_key=None):
         self.model = model
         self.mode = mode
         self.api_key = api_key
+        self.metrics = [] 
         if self.mode == "API (OpenAI)":
             openai.api_key = self.api_key
 
+    import time
+from openai import OpenAI
+
+class LLMBrain:
+    def __init__(self, model="gpt-4o-mini", mode="Local (Ollama)", api_key=None):
+        self.model = model
+        self.mode = mode
+        self.api_key = api_key
+        self.metrics = []
+
+        if self.mode == "API (OpenAI)":
+            if not api_key:
+                raise ValueError("OpenAI API key is required for API mode")
+            self.client = OpenAI(api_key=api_key)
+
     def chat(self, system_prompt, user_prompt, response_format="text", temperature=0.1):
+        start_time = time.time()
+        tokens_used = 0
+        model_used = self.model
 
-        if self.mode == "Local (Ollama)":
-            import ollama
-            print("🔧 Sending request to Ollama...")
-            print("MODEL:", self.model)
-            print("SYSTEM PROMPT:", system_prompt[:200])  # Print trimmed prompt
-            print("USER PROMPT:", user_prompt[:200])
+        try:
+            # ===============================
+            # LOCAL OLLAMA
+            # ===============================
+            if self.mode == "Local (Ollama)":
+                import ollama
+                print("🔧 Sending request to Ollama...")
+                response = ollama.chat(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    format="json" if response_format == "json" else None,
+                    options={"temperature": temperature}
+                )
+                content = response["message"]["content"]
 
-            response = ollama.chat(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                format="json" if response_format == "json" else None,
-                options={"temperature": temperature}
-            )
-            return response["message"]["content"]
+            # ===============================
+            # OPENAI API (NEW SDK)
+            # ===============================
+            elif self.mode == "API (OpenAI)":
+                print("🌐 Sending request to OpenAI API...")
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=temperature
+                )
 
-        elif self.mode == "API (OpenAI)":
-            import openai
-            from openai import OpenAI
+                content = response.choices[0].message.content
+                tokens_used = response.usage.total_tokens
 
-            ...
+            else:
+                raise ValueError("Invalid LLM mode")
 
-            client = OpenAI(api_key=self.api_key)
-            response = client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=temperature
-            )
-            return response.choices[0].message.content
+            elapsed = time.time() - start_time
+
+            # ===============================
+            # METRICS
+            # ===============================
+            self.metrics.append({
+                "model": model_used,
+                "mode": self.mode,
+                "time_sec": round(elapsed, 3),
+                "tokens": tokens_used
+            })
+
+            return content
+
+        except Exception as e:
+            elapsed = time.time() - start_time
+            self.metrics.append({
+                "model": model_used,
+                "mode": self.mode,
+                "time_sec": round(elapsed, 3),
+                "tokens": 0,
+                "error": str(e)
+            })
+            raise e
+
 
 
     # --------------------------------------------------
@@ -209,3 +258,43 @@ Elements: {json.dumps(elements[:50])}
             return parsed if isinstance(parsed, list) else []
         except Exception as e:
             return [{"name": "Error Refining Plan", "description": str(e), "is_error": True}]
+    # --------------------------------------------------
+    # METRICS / OBSERVABILITY
+    # --------------------------------------------------
+
+    def get_metrics_summary(self):
+        if not self.metrics:
+            return {
+                "total_calls": 0,
+                "total_tokens": 0,
+                "average_time": 0,
+                "errors": 0,
+                "per_model": {}
+            }
+
+        total_time = sum(m["time"] for m in self.metrics)
+        total_tokens = sum(m.get("tokens", 0) for m in self.metrics)
+        errors = sum(1 for m in self.metrics if "error" in m)
+
+        model_breakdown = {}
+        for m in self.metrics:
+            key = f"{m['mode']} / {m['model']}"
+            if key not in model_breakdown:
+                model_breakdown[key] = {"count": 0, "total_time": 0, "total_tokens": 0, "errors": 0}
+            model_breakdown[key]["count"] += 1
+            model_breakdown[key]["total_time"] += m["time"]
+            model_breakdown[key]["total_tokens"] += m.get("tokens", 0)
+            if "error" in m:
+                model_breakdown[key]["errors"] += 1
+
+        return {
+            "total_calls": len(self.metrics),
+            "total_tokens": total_tokens,
+            "average_time": total_time / len(self.metrics),
+            "errors": errors,
+            "per_model": model_breakdown
+        }
+
+    def reset_metrics(self):
+        self.metrics.clear()
+
