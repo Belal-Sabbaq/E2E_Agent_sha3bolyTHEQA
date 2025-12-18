@@ -1,30 +1,25 @@
-# ui_utils.py
 import streamlit as st
 
 def config_model_selector():
-    with st.sidebar:
-        mode = st.selectbox(
-            "Model Mode",
-            ["Local (Ollama)", "API (OpenAI)"],
-            key="model_mode"
-        )
+    st.sidebar.header("Model Configuration")
 
-        if mode == "Local (Ollama)":
-            st.selectbox(
-                "Local Model",
-                ["qwen3:4b", "llama3", "mistral"],
-                key="model_name"
-            )
+    # ✅ Use Groq models 
+    groq_models = [
+        "llama-3.1-8b-instant",
+        "llama3-70b-8192",
+        "mixtral-8x7b-32768"
+    ]
 
-        else:
-            st.selectbox(
-                "OpenAI Model",
-                ["gpt-4o", "gpt-4o-mini", "gpt-3.5-turbo"],
-                key="model_name"
-            )
+    # Dropdown for model selection
+    model_name = st.sidebar.selectbox("Choose Model", groq_models, index=0)
 
-            st.text_input(
-                "OpenAI API Key",
-                type="password",
-                key="api_key"
-            )
+    # Dropdown for mode selection
+    model_mode = st.sidebar.selectbox("Mode", ["Local (Ollama)", "API (Groq)"], index=1)
+
+    # Input for Groq API key
+    api_key = st.sidebar.text_input("Groq API Key", type="password")
+
+    # Save into session state
+    st.session_state["model_name"] = model_name
+    st.session_state["model_mode"] = model_mode
+    st.session_state["api_key"] = api_key

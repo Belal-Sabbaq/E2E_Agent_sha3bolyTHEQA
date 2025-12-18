@@ -1,39 +1,29 @@
 import json
-import openai
 import time
+import requests
 
 class LLMBrain:
-    def __init__(self, model="qwen3:4b", mode="Local (Ollama)", api_key=None):
-        self.model = model
-        self.mode = mode
-        self.api_key = api_key
-        self.metrics = [] 
-        if self.mode == "API (OpenAI)":
-            openai.api_key = self.api_key
-
-    import time
-from openai import OpenAI
-
-class LLMBrain:
-    def __init__(self, model="gpt-4o-mini", mode="Local (Ollama)", api_key=None):
+    def __init__(self, model="llama-3.1-8b-instant", mode="Local (Ollama)", api_key=None):
         self.model = model
         self.mode = mode
         self.api_key = api_key
         self.metrics = []
 
-        if self.mode == "API (OpenAI)":
-            if not api_key:
-                raise ValueError("OpenAI API key is required for API mode")
-            self.client = OpenAI(api_key=api_key)
+        if self.mode == "API (Groq)" and not api_key:
+            raise ValueError("Groq API key is required for API (Groq) mode")
 
     def chat(self, system_prompt, user_prompt, response_format="text", temperature=0.1):
+        import time
+        import requests
+
         start_time = time.time()
         tokens_used = 0
         model_used = self.model
+        print("🔥 FINAL MODEL SENT TO GROQ:", repr(self.model))
 
         try:
             # ===============================
-            # LOCAL OLLAMA
+            # LOCAL (OLLAMA)
             # ===============================
             if self.mode == "Local (Ollama)":
                 import ollama
@@ -50,35 +40,56 @@ class LLMBrain:
                 content = response["message"]["content"]
 
             # ===============================
-            # OPENAI API (NEW SDK)
+            # GROQ API (via HTTP)
             # ===============================
-            elif self.mode == "API (OpenAI)":
-                print("🌐 Sending request to OpenAI API...")
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
+            elif self.mode == "API (Groq)":
+                print("🌐 Sending request to Groq API...")
+                url = "https://api.groq.com/openai/v1/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json"
+                }
+                payload = {
+                    "model": self.model,
+                    "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
                     ],
-                    temperature=temperature
-                )
+                    "temperature": temperature,
+                    "max_tokens": 1024
+                }
 
-                content = response.choices[0].message.content
-                tokens_used = response.usage.total_tokens
+                import requests
+                import json
 
+                response = requests.post(url, headers=headers, json=payload)
+
+                if response.status_code != 200:
+                    print("❌ STATUS:", response.status_code)
+                    print("❌ RESPONSE HEADERS:", response.headers)
+                    print("❌ RESPONSE BODY:", response.text)
+                    raise RuntimeError("Groq request failed")
+
+                data = response.json()
+
+                content = data["choices"][0]["message"]["content"]
+                tokens_used = data.get("usage", {}).get("total_tokens", 0)
+
+            # ===============================
+            # UNSUPPORTED MODE
+            # ===============================
             else:
-                raise ValueError("Invalid LLM mode")
+                raise Exception(f"Unsupported mode: {self.mode}")
 
+            # ===============================
+            # METRICS LOGGING
+            # ===============================
             elapsed = time.time() - start_time
-
-            # ===============================
-            # METRICS
-            # ===============================
             self.metrics.append({
                 "model": model_used,
-                "mode": self.mode,
-                "time_sec": round(elapsed, 3),
-                "tokens": tokens_used
+                "time": elapsed,
+                "tokens": tokens_used,
+                "mode": self.mode
             })
 
             return content
@@ -87,95 +98,95 @@ class LLMBrain:
             elapsed = time.time() - start_time
             self.metrics.append({
                 "model": model_used,
-                "mode": self.mode,
-                "time_sec": round(elapsed, 3),
+                "time": elapsed,
                 "tokens": 0,
-                "error": str(e)
+                "error": str(e),
+                "mode": self.mode
             })
+            print("❌ LLM ERROR:", e)
             raise e
 
 
-
-    # --------------------------------------------------
-    # TEST PLAN GENERATION
-    # --------------------------------------------------
+        # --------------------------------------------------
+        # TEST PLAN GENERATION
+        # --------------------------------------------------
     def generate_test_plan(self, scraped_data, memory_context=None):
-        elements = scraped_data.get("elements", [])
-        clean_dom = scraped_data.get("cleaned_dom", "")[:10000]
+            elements = scraped_data.get("elements", [])
+            clean_dom = scraped_data.get("cleaned_dom", "")[:10000]
 
-        memory_prompt = ""
-        if memory_context:
-            if memory_context.get("avoid"):
-                memory_prompt += "\n\n🚫 THINGS TO AVOID:\n" + "\n".join(memory_context["avoid"])
-            if memory_context.get("emulate"):
-                memory_prompt += "\n\n✅ PATTERNS TO FOLLOW:\n" + "\n".join(memory_context["emulate"])
+            memory_prompt = ""
+            if memory_context:
+                if memory_context.get("avoid"):
+                    memory_prompt += "\n\n🚫 THINGS TO AVOID:\n" + "\n".join(memory_context["avoid"])
+                if memory_context.get("emulate"):
+                    memory_prompt += "\n\n✅ PATTERNS TO FOLLOW:\n" + "\n".join(memory_context["emulate"])
 
-        system_prompt = f"""
-You are an expert QA Automation Engineer.
+            system_prompt = f"""
+    You are an expert QA Automation Engineer.
 
-Generate 3–5 Playwright test cases.
+    Generate 3–5 Playwright test cases.
 
-STRICT OUTPUT RULES:
-- Return ONLY a valid JSON LIST
-- No markdown
-- No explanations
-- No wrapping keys
+    STRICT OUTPUT RULES:
+    - Return ONLY a valid JSON LIST
+    - No markdown
+    - No explanations
+    - No wrapping keys
 
-FORMAT:
-[
-  {{
-    "name": "...",
-    "description": "...",
-    "missing_data": [],
-    "requires_auth": false
-  }}
-]
+    FORMAT:
+    [
+    {{
+        "name": "...",
+        "description": "...",
+        "missing_data": [],
+        "requires_auth": false
+    }}
+    ]
 
-{memory_prompt}
-"""
+    {memory_prompt}
+    """
 
-        user_prompt = f"""
-Page Title: {scraped_data.get('title')}
-Elements: {json.dumps(elements[:50])}
-DOM: {clean_dom}
-"""
+            user_prompt = f"""
+    Page Title: {scraped_data.get('title')}
+    Elements: {json.dumps(elements[:50])}
+    DOM: {clean_dom}
+    """
 
-        print("🧠 Brain is thinking...")
+            print("🧠 Brain is thinking...")
 
-        try:
-            content = self.chat(system_prompt, user_prompt, response_format="json")
+            try:
+                content = self.chat(system_prompt, user_prompt, response_format="json")
 
-            if not content or not isinstance(content, str):
-                raise ValueError("Empty LLM response")
+                if not content or not isinstance(content, str):
+                    raise ValueError("Empty LLM response")
 
-            if "```" in content:
-                content = content.replace("```json", "").replace("```", "").strip()
+                if "```" in content:
+                    content = content.replace("```json", "").replace("```", "").strip()
 
-            parsed_json = json.loads(content)
+                parsed_json = json.loads(content)
 
-            if not isinstance(parsed_json, list):
-                raise ValueError("LLM did not return a JSON list")
+                if not isinstance(parsed_json, list):
+                    raise ValueError("LLM did not return a JSON list")
 
-            safe_plan = []
-            for item in parsed_json:
-                if isinstance(item, dict):
-                    safe_plan.append({
-                        "name": item.get("name", "Unnamed Test"),
-                        "description": item.get("description", ""),
-                        "missing_data": item.get("missing_data", []),
-                        "requires_auth": item.get("requires_auth", False)
-                    })
+                safe_plan = []
+                for item in parsed_json:
+                    if isinstance(item, dict):
+                        safe_plan.append({
+                            "name": item.get("name", "Unnamed Test"),
+                            "description": item.get("description", ""),
+                            "missing_data": item.get("missing_data", []),
+                            "requires_auth": item.get("requires_auth", False)
+                        })
 
-            return safe_plan
+                return safe_plan
 
-        except Exception as e:
-            print("❌ LLM ERROR:", e)
-            return [{
-                "name": "Error Generating Plan",
-                "description": str(e),
-                "missing_data": [],
-                "is_error": True
-            }]
+            except Exception as e:
+                print("❌ LLM ERROR:", e)
+                return [{
+                    "name": "Error Generating Plan",
+                    "description": str(e),
+                    "missing_data": [],
+                    "is_error": True
+                }]
 
     # --------------------------------------------------
     # CODE GENERATION
@@ -258,10 +269,10 @@ Elements: {json.dumps(elements[:50])}
             return parsed if isinstance(parsed, list) else []
         except Exception as e:
             return [{"name": "Error Refining Plan", "description": str(e), "is_error": True}]
+
     # --------------------------------------------------
     # METRICS / OBSERVABILITY
     # --------------------------------------------------
-
     def get_metrics_summary(self):
         if not self.metrics:
             return {
@@ -297,4 +308,3 @@ Elements: {json.dumps(elements[:50])}
 
     def reset_metrics(self):
         self.metrics.clear()
-

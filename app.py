@@ -17,9 +17,10 @@ config_model_selector()  # This sets model_name, model_mode, and api_key
 api_key = st.session_state.get("api_key")
 mode = st.session_state.get("model_mode")
 
-if mode == "API (OpenAI)" and not api_key:
-    st.error("❌ Please enter your OpenAI API key in the sidebar.")
+if mode == "API (Groq)" and not api_key:
+    st.error("❌ Please enter your Groq API key in the sidebar.")
     st.stop()
+
 nest_asyncio.apply()
 st.set_page_config(layout="wide", page_title="AI QA Agent")
 
@@ -41,12 +42,11 @@ if "current_step" not in st.session_state:
 
 # LLMBrain: Always use latest selector
 st.session_state.brain = LLMBrain(
-    model=st.session_state.get("model_name", "gpt-4o"),
-    mode=st.session_state.get("model_mode", "API (OpenAI)"),
-    api_key=st.session_state.get("api_key")  # ← this must NOT be None!
+    model=st.session_state.get("model_name", "llama3-8b-8192"),
+    mode=st.session_state.get("model_mode", "API (Groq)"),
+    api_key=st.session_state.get("api_key")
 )
-
-
+print("Groq API Key:", st.session_state.get("api_key"))
 # DEBUG: Show model in use
 st.sidebar.markdown(f"**🧠 Model:** `{st.session_state.get('model_name')}`")
 st.sidebar.markdown(f"**⚙️ Mode:** `{st.session_state.get('model_mode')}`")
@@ -75,8 +75,6 @@ with st.sidebar:
         brain.reset_metrics()
         st.success("Metrics reset.")
         st.rerun()
-
-
 
 # -------------------------------------------------
 # UI LAYOUT & FLOW
