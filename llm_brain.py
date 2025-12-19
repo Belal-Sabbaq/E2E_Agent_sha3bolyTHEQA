@@ -40,6 +40,49 @@ class LLMBrain:
         return match.group(0)
 
     # --------------------------------------------------
+    # METRICS SUMMARY
+    # --------------------------------------------------
+    def get_metrics_summary(self):
+        if not self.metrics:
+            return {
+                "total_calls": 0,
+                "total_tokens": 0,
+                "average_time": 0.0,
+                "errors": 0,
+                "per_model": {}
+            }
+
+        total_time = sum(m["time"] for m in self.metrics)
+        total_tokens = sum(m.get("tokens", 0) for m in self.metrics)
+        errors = sum(1 for m in self.metrics if "error" in m)
+
+        per_model = {}
+        for m in self.metrics:
+            key = f"{m['mode']} / {m['model']}"
+            stats = per_model.setdefault(
+                key, {"count": 0, "total_time": 0.0, "total_tokens": 0, "errors": 0}
+            )
+            stats["count"] += 1
+            stats["total_time"] += m["time"]
+            stats["total_tokens"] += m.get("tokens", 0)
+            if "error" in m:
+                stats["errors"] += 1
+
+        return {
+            "total_calls": len(self.metrics),
+            "total_tokens": total_tokens,
+            "average_time": total_time / len(self.metrics),
+            "errors": errors,
+            "per_model": per_model
+        }
+
+    # --------------------------------------------------
+    # RESET METRICS
+    # --------------------------------------------------
+    def reset_metrics(self):
+        self.metrics.clear()
+
+    # --------------------------------------------------
     # CORE CHAT METHOD
     # --------------------------------------------------
     def chat(self, system_prompt, user_prompt, response_format="text", temperature=0.1):
@@ -125,6 +168,7 @@ class LLMBrain:
             print("❌ LLM ERROR:", e)
             raise
 
+   
     # --------------------------------------------------
     # TEST PLAN GENERATION
     # --------------------------------------------------
@@ -174,32 +218,23 @@ DOM: {clean_dom}
 
         try:
             content = self.chat(system_prompt, user_prompt)
-
-            if not content or not isinstance(content, str):
-                raise ValueError("Empty LLM response")
-
             content = content.replace("```json", "").replace("```", "").strip()
 
             json_text = self._extract_json_array(content)
             parsed_json = json.loads(json_text)
 
-            if not isinstance(parsed_json, list):
-                raise ValueError("LLM did not return a JSON list")
-
             safe_plan = []
             seen = set()
-
             for item in parsed_json:
-                if isinstance(item, dict):
-                    name = item.get("name", "").strip()
-                    if name and name not in seen:
-                        seen.add(name)
-                        safe_plan.append({
-                            "name": name,
-                            "description": item.get("description", ""),
-                            "missing_data": item.get("missing_data", []),
-                            "requires_auth": item.get("requires_auth", False)
-                        })
+                name = item.get("name", "").strip()
+                if name and name not in seen:
+                    seen.add(name)
+                    safe_plan.append({
+                        "name": name,
+                        "description": item.get("description", ""),
+                        "missing_data": item.get("missing_data", []),
+                        "requires_auth": item.get("requires_auth", False)
+                    })
 
             return safe_plan
 
@@ -214,16 +249,10 @@ DOM: {clean_dom}
 
     # --------------------------------------------------
     # PLAYWRIGHT CODE GENERATION
-    # --------------------------------------------------
-       # --------------------------------------------------
-    # PLAYWRIGHT CODE GENERATION
-    # --------------------------------------------------
+    # -------------------------------------------------
     def generate_playwright_code(self, test_case, scraped_data):
         """
-        Template-based codegen:
-        - LLM returns only structured 'selector + assertion' JSON
-        - We render a fixed Playwright script template (always valid Python)
-        - We collect step screenshots + result.json for trust-building
+        Template-based codegen with retry-safe JSON spec generation.
         """
         url = scraped_data.get("url") or scraped_data.get("final_url") or ""
         elements = scraped_data.get("elements", [])
@@ -238,147 +267,207 @@ DOM: {clean_dom}
             .replace('"', "")
         )
 
-        # ---------------------------
-        # 1) Ask LLM for ONLY JSON spec
-        # ---------------------------
-        system_prompt = """
-You are a QA automation planner.
+        # --------------------------------------------------
+        # JSON SPEC PROMPTS
+        # --------------------------------------------------
+        base_system_prompt = """
+    You are a strict JSON generator.
 
-Return ONLY a valid JSON object (no markdown, no explanations).
-The JSON must contain:
-{
-  "selector": "<best Playwright locator strategy as a string>",
-  "assertion": {
-    "type": "visible|has_text|title_is",
-    "value": "<string value or empty>"
-  }
-}
+    Output ONLY a valid JSON object.
+    No explanations, no markdown, no comments.
 
-Rules:
-- Response must start with '{' and end with '}'.
-- selector should be Playwright-friendly.
-- If the test is about page title, use assertion.type = "title_is".
-"""
+    SCHEMA (MUST FOLLOW EXACTLY):
+    {
+    "selector": "<string or empty>",
+    "assertion": {
+        "type": "visible | has_text | title_is",
+        "value": "<string or empty>"
+    }
+    }
+
+    RULES:
+    - Use double quotes only
+    - No trailing commas
+    - Start with '{' and end with '}'
+    - If test is about page title:
+    selector = ""
+    assertion.type = "title_is"
+    """
+
+        retry_system_prompt = """
+    You MUST output valid JSON.
+
+    DO NOT explain.
+    DO NOT add text.
+    DO NOT format.
+
+    ONLY THIS JSON OBJECT:
+    {
+    "selector": "",
+    "assertion": {
+        "type": "title_is",
+        "value": ""
+    }
+    }
+
+    Replace values correctly based on the test.
+    """
 
         user_prompt = f"""
-TEST_NAME: {test_name}
-DESCRIPTION: {test_case.get("description", "")}
-URL: {url}
+    TEST_NAME: {test_name}
+    DESCRIPTION: {test_case.get("description", "")}
+    URL: {url}
 
-KNOWN_ELEMENTS:
-{json.dumps(elements[:50])}
+    KNOWN_ELEMENTS:
+    {json.dumps(elements[:50])}
 
-USER_DATA:
-{json.dumps(user_data)}
-"""
+    USER_DATA:
+    {json.dumps(user_data)}
+    """
 
+        spec = None
+        raw_output = ""
+
+        # --------------------------------------------------
+        # Attempt 1
+        # --------------------------------------------------
         try:
-            spec_raw = self.chat(system_prompt, user_prompt, temperature=0.1).strip()
-            spec_raw = spec_raw.replace("```json", "").replace("```", "").strip()
-            spec_json_text = self._extract_json_object(spec_raw)
+            raw_output = self.chat(
+                base_system_prompt,
+                user_prompt,
+                temperature=0
+            ).strip()
+
+            raw_output = raw_output.replace("```json", "").replace("```", "").strip()
+            spec_json_text = self._extract_json_object(raw_output)
             spec = json.loads(spec_json_text)
 
-            selector = spec.get("selector", "").strip()
-            assertion = spec.get("assertion", {}) or {}
-            assertion_type = assertion.get("type", "visible")
-            assertion_value = (assertion.get("value") or "").strip()
+        except Exception:
+            # --------------------------------------------------
+            # Attempt 2 (retry with extreme constraints)
+            # --------------------------------------------------
+            try:
+                raw_output = self.chat(
+                    retry_system_prompt,
+                    user_prompt,
+                    temperature=0
+                ).strip()
 
-            if not url:
-                raise ValueError("Missing URL in scraped_data")
-            if assertion_type not in {"visible", "has_text", "title_is"}:
-                assertion_type = "visible"
-            if assertion_type != "title_is" and not selector:
-                raise ValueError("LLM did not provide a selector")
+                raw_output = raw_output.replace("```json", "").replace("```", "").strip()
+                spec_json_text = self._extract_json_object(raw_output)
+                spec = json.loads(spec_json_text)
 
-        except Exception as e:
+            except Exception as e:
+                return (
+                    "# GENERATED CODE REJECTED\n"
+                    "# Reason: could not build valid spec JSON after retry\n"
+                    f"# Raw LLM output:\n# {raw_output}\n"
+                    f"# Error: {e}\n"
+                )
+
+        # --------------------------------------------------
+        # Validate spec
+        # --------------------------------------------------
+        selector = (spec.get("selector") or "").strip()
+        assertion = spec.get("assertion") or {}
+        assertion_type = assertion.get("type", "visible")
+        assertion_value = (assertion.get("value") or "").strip()
+
+        if not url:
+            return "# GENERATED CODE REJECTED\n# Reason: missing URL\n"
+
+        if assertion_type not in {"visible", "has_text", "title_is"}:
+            assertion_type = "visible"
+
+        if assertion_type != "title_is" and not selector:
             return (
                 "# GENERATED CODE REJECTED\n"
-                f"# Reason: could not build spec JSON ({e})\n"
+                "# Reason: selector missing for non-title assertion\n"
             )
 
-        # ---------------------------
-        # 2) Render fixed template
-        # ---------------------------
+        # --------------------------------------------------
+        # Render FIXED template (unchanged)
+        # --------------------------------------------------
         template = f'''\
-import os
-import json
-from datetime import datetime
-from playwright.sync_api import sync_playwright
+    import os
+    import json
+    from datetime import datetime
+    from playwright.sync_api import sync_playwright
 
-TEST_NAME = "{safe_test_name}"
-URL = {json.dumps(url)}
+    TEST_NAME = "{safe_test_name}"
+    URL = {json.dumps(url)}
 
-def save_step(page, step_name):
-    base = os.path.join("artifacts", TEST_NAME)
-    os.makedirs(base, exist_ok=True)
-    path = os.path.join(base, step_name + ".png")
-    page.screenshot(path=path, full_page=True)
+    def save_step(page, step_name):
+        base = os.path.join("artifacts", TEST_NAME)
+        os.makedirs(base, exist_ok=True)
+        path = os.path.join(base, step_name + ".png")
+        page.screenshot(path=path, full_page=True)
 
-def write_result(status, error_msg=None):
-    base = os.path.join("artifacts", TEST_NAME)
-    os.makedirs(base, exist_ok=True)
-    result = {{
-        "test_name": TEST_NAME,
-        "status": status,
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-        "error": error_msg
-    }}
-    with open(os.path.join(base, "result.json"), "w", encoding="utf-8") as f:
-        json.dump(result, f, indent=2)
+    def write_result(status, error_msg=None):
+        base = os.path.join("artifacts", TEST_NAME)
+        os.makedirs(base, exist_ok=True)
+        result = {{
+            "test_name": TEST_NAME,
+            "status": status,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "error": error_msg
+        }}
+        with open(os.path.join(base, "result.json"), "w", encoding="utf-8") as f:
+            json.dump(result, f, indent=2)
 
-def main():
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
-        page = browser.new_page()
+    def main():
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=False)
+            page = browser.new_page()
 
-        try:
-            save_step(page, "step_01_before_goto")
-            page.goto(URL, wait_until="domcontentloaded")
-            save_step(page, "step_02_after_goto")
+            try:
+                save_step(page, "step_01_before_goto")
+                page.goto(URL, wait_until="domcontentloaded")
+                save_step(page, "step_02_after_goto")
 
-            assertion_type = {json.dumps(assertion_type)}
-            assertion_value = {json.dumps(assertion_value)}
-            selector = {json.dumps(selector)}
+                assertion_type = {json.dumps(assertion_type)}
+                assertion_value = {json.dumps(assertion_value)}
+                selector = {json.dumps(selector)}
 
-            if assertion_type == "title_is":
-                title = page.title()
-                save_step(page, "step_03_title_captured")
-                if title != assertion_value:
-                    save_step(page, "step_error")
-                    raise AssertionError(
-                        f"Title mismatch: got '{{title}}', expected '{{assertion_value}}'"
-                    )
-                save_step(page, "step_04_assert_pass")
-            else:
-                loc = page.locator(selector)
-                loc.wait_for(state="visible", timeout=5000)
-                save_step(page, "step_03_element_visible")
-
-                if assertion_type == "has_text":
-                    txt = loc.first.inner_text().strip()
-                    save_step(page, "step_04_text_captured")
-                    if assertion_value not in txt:
+                if assertion_type == "title_is":
+                    title = page.title()
+                    save_step(page, "step_03_title_captured")
+                    if title != assertion_value:
                         save_step(page, "step_error")
                         raise AssertionError(
-                            f"Text mismatch: got '{{txt}}', expected to contain '{{assertion_value}}'"
+                            f"Title mismatch: got '{{title}}', expected '{{assertion_value}}'"
                         )
-                    save_step(page, "step_05_assert_pass")
-                else:
-                    if not loc.first.is_visible():
-                        save_step(page, "step_error")
-                        raise AssertionError("Element not visible")
                     save_step(page, "step_04_assert_pass")
+                else:
+                    loc = page.locator(selector)
+                    loc.wait_for(state="visible", timeout=5000)
+                    save_step(page, "step_03_element_visible")
 
-            write_result("PASS")
-        except Exception as e:
-            write_result("FAIL", str(e))
-            raise
-        finally:
-            browser.close()
+                    if assertion_type == "has_text":
+                        txt = loc.first.inner_text().strip()
+                        save_step(page, "step_04_text_captured")
+                        if assertion_value not in txt:
+                            save_step(page, "step_error")
+                            raise AssertionError(
+                                f"Text mismatch: got '{{txt}}', expected to contain '{{assertion_value}}'"
+                            )
+                        save_step(page, "step_05_assert_pass")
+                    else:
+                        if not loc.first.is_visible():
+                            save_step(page, "step_error")
+                            raise AssertionError("Element not visible")
+                        save_step(page, "step_04_assert_pass")
 
-if __name__ == "__main__":
-    main()
-'''
+                write_result("PASS")
+            except Exception as e:
+                write_result("FAIL", str(e))
+                raise
+            finally:
+                browser.close()
+
+    if __name__ == "__main__":
+        main()
+    '''
 
         try:
             compile(template, "<template_playwright_test>", "exec")
@@ -390,45 +479,4 @@ if __name__ == "__main__":
 
         return template
 
-    # --------------------------------------------------
-    # METRICS SUMMARY
-    # --------------------------------------------------
-    def get_metrics_summary(self):
-        if not self.metrics:
-            return {
-                "total_calls": 0,
-                "total_tokens": 0,
-                "average_time": 0.0,
-                "errors": 0,
-                "per_model": {}
-            }
-
-        total_time = sum(m["time"] for m in self.metrics)
-        total_tokens = sum(m.get("tokens", 0) for m in self.metrics)
-        errors = sum(1 for m in self.metrics if "error" in m)
-
-        per_model = {}
-        for m in self.metrics:
-            key = f"{m['mode']} / {m['model']}"
-            stats = per_model.setdefault(
-                key, {"count": 0, "total_time": 0.0, "total_tokens": 0, "errors": 0}
-            )
-            stats["count"] += 1
-            stats["total_time"] += m["time"]
-            stats["total_tokens"] += m.get("tokens", 0)
-            if "error" in m:
-                stats["errors"] += 1
-
-        return {
-            "total_calls": len(self.metrics),
-            "total_tokens": total_tokens,
-            "average_time": total_time / len(self.metrics),
-            "errors": errors,
-            "per_model": per_model
-        }
-
-    # --------------------------------------------------
-    # RESET METRICS
-    # --------------------------------------------------
-    def reset_metrics(self):
-        self.metrics.clear()
+    
