@@ -65,7 +65,7 @@ if "current_step" not in st.session_state:
 # LLMBrain: Always use latest selector
 if "brain" not in st.session_state:
     st.session_state.brain = LLMBrain(
-        model=st.session_state.get("model_name", "llama-3.1-8b-instant"),
+        model=st.session_state.get("model_name", "qwen3:4b"),
         mode=st.session_state.get("model_mode", "API (Groq)"),
         api_key=st.session_state.get("api_key")
     )
