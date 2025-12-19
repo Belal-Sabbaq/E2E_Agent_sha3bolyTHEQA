@@ -30,6 +30,15 @@ class LLMBrain:
             raise ValueError("No valid JSON array found in LLM output")
         return match.group(0)
 
+    def _extract_json_object(self, text: str) -> str:
+        """
+        Extract first JSON object from text.
+        """
+        match = re.search(r"\{\s*\".*\"\s*\}", text, re.DOTALL)
+        if not match:
+            raise ValueError("No valid JSON object found in LLM output")
+        return match.group(0)
+
     # --------------------------------------------------
     # CORE CHAT METHOD
     # --------------------------------------------------
@@ -206,52 +215,180 @@ DOM: {clean_dom}
     # --------------------------------------------------
     # PLAYWRIGHT CODE GENERATION
     # --------------------------------------------------
+       # --------------------------------------------------
+    # PLAYWRIGHT CODE GENERATION
+    # --------------------------------------------------
     def generate_playwright_code(self, test_case, scraped_data):
+        """
+        Template-based codegen:
+        - LLM returns only structured 'selector + assertion' JSON
+        - We render a fixed Playwright script template (always valid Python)
+        - We collect step screenshots + result.json for trust-building
+        """
+        url = scraped_data.get("url") or scraped_data.get("final_url") or ""
         elements = scraped_data.get("elements", [])
         user_data = test_case.get("user_data", {})
 
+        test_name = test_case.get("name", "unnamed_test").strip()
+        safe_test_name = (
+            test_name.lower()
+            .replace(" ", "_")
+            .replace("/", "_")
+            .replace("'", "")
+            .replace('"', "")
+        )
+
+        # ---------------------------
+        # 1) Ask LLM for ONLY JSON spec
+        # ---------------------------
         system_prompt = """
-You are an expert Playwright Automation Engineer (Python).
+You are a QA automation planner.
 
-CRITICAL RULES:
-- Output ONLY valid Python code
-- No explanations
-- No markdown
-- No backticks
-- Code must be directly executable
+Return ONLY a valid JSON object (no markdown, no explanations).
+The JSON must contain:
+{
+  "selector": "<best Playwright locator strategy as a string>",
+  "assertion": {
+    "type": "visible|has_text|title_is",
+    "value": "<string value or empty>"
+  }
+}
 
-TECHNICAL REQUIREMENTS:
-- Use: from playwright.sync_api import sync_playwright
-- Define a main() function
-- Launch Chromium
-- Open the provided URL
-- Perform the test
-- Close the browser properly
+Rules:
+- Response must start with '{' and end with '}'.
+- selector should be Playwright-friendly.
+- If the test is about page title, use assertion.type = "title_is".
 """
 
         user_prompt = f"""
-TEST_NAME: {test_case['name']}
-DESCRIPTION: {test_case['description']}
-URL: {scraped_data.get('url')}
-ELEMENTS: {json.dumps(elements[:50])}
-USER_DATA: {json.dumps(user_data)}
+TEST_NAME: {test_name}
+DESCRIPTION: {test_case.get("description", "")}
+URL: {url}
+
+KNOWN_ELEMENTS:
+{json.dumps(elements[:50])}
+
+USER_DATA:
+{json.dumps(user_data)}
 """
 
         try:
-            code = self.chat(system_prompt, user_prompt)
+            spec_raw = self.chat(system_prompt, user_prompt, temperature=0.1).strip()
+            spec_raw = spec_raw.replace("```json", "").replace("```", "").strip()
+            spec_json_text = self._extract_json_object(spec_raw)
+            spec = json.loads(spec_json_text)
 
-            code = code.replace("```python", "").replace("```", "").strip()
+            selector = spec.get("selector", "").strip()
+            assertion = spec.get("assertion", {}) or {}
+            assertion_type = assertion.get("type", "visible")
+            assertion_value = (assertion.get("value") or "").strip()
 
-            # HARD PYTHON VALIDATION
-            compile(code, "<generated_playwright_test>", "exec")
-
-            return code
+            if not url:
+                raise ValueError("Missing URL in scraped_data")
+            if assertion_type not in {"visible", "has_text", "title_is"}:
+                assertion_type = "visible"
+            if assertion_type != "title_is" and not selector:
+                raise ValueError("LLM did not provide a selector")
 
         except Exception as e:
             return (
                 "# GENERATED CODE REJECTED\n"
-                f"# Reason: {e}\n"
+                f"# Reason: could not build spec JSON ({e})\n"
             )
+
+        # ---------------------------
+        # 2) Render fixed template
+        # ---------------------------
+        template = f'''\
+import os
+import json
+from datetime import datetime
+from playwright.sync_api import sync_playwright
+
+TEST_NAME = "{safe_test_name}"
+URL = {json.dumps(url)}
+
+def save_step(page, step_name):
+    base = os.path.join("artifacts", TEST_NAME)
+    os.makedirs(base, exist_ok=True)
+    path = os.path.join(base, step_name + ".png")
+    page.screenshot(path=path, full_page=True)
+
+def write_result(status, error_msg=None):
+    base = os.path.join("artifacts", TEST_NAME)
+    os.makedirs(base, exist_ok=True)
+    result = {{
+        "test_name": TEST_NAME,
+        "status": status,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "error": error_msg
+    }}
+    with open(os.path.join(base, "result.json"), "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2)
+
+def main():
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=False)
+        page = browser.new_page()
+
+        try:
+            save_step(page, "step_01_before_goto")
+            page.goto(URL, wait_until="domcontentloaded")
+            save_step(page, "step_02_after_goto")
+
+            assertion_type = {json.dumps(assertion_type)}
+            assertion_value = {json.dumps(assertion_value)}
+            selector = {json.dumps(selector)}
+
+            if assertion_type == "title_is":
+                title = page.title()
+                save_step(page, "step_03_title_captured")
+                if title != assertion_value:
+                    save_step(page, "step_error")
+                    raise AssertionError(
+                        f"Title mismatch: got '{{title}}', expected '{{assertion_value}}'"
+                    )
+                save_step(page, "step_04_assert_pass")
+            else:
+                loc = page.locator(selector)
+                loc.wait_for(state="visible", timeout=5000)
+                save_step(page, "step_03_element_visible")
+
+                if assertion_type == "has_text":
+                    txt = loc.first.inner_text().strip()
+                    save_step(page, "step_04_text_captured")
+                    if assertion_value not in txt:
+                        save_step(page, "step_error")
+                        raise AssertionError(
+                            f"Text mismatch: got '{{txt}}', expected to contain '{{assertion_value}}'"
+                        )
+                    save_step(page, "step_05_assert_pass")
+                else:
+                    if not loc.first.is_visible():
+                        save_step(page, "step_error")
+                        raise AssertionError("Element not visible")
+                    save_step(page, "step_04_assert_pass")
+
+            write_result("PASS")
+        except Exception as e:
+            write_result("FAIL", str(e))
+            raise
+        finally:
+            browser.close()
+
+if __name__ == "__main__":
+    main()
+'''
+
+        try:
+            compile(template, "<template_playwright_test>", "exec")
+        except SyntaxError as e:
+            return (
+                "# GENERATED CODE REJECTED\n"
+                f"# Reason: template compile failed ({e})\n"
+            )
+
+        return template
 
     # --------------------------------------------------
     # METRICS SUMMARY

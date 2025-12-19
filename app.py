@@ -13,6 +13,28 @@ from ui_utils import config_model_selector
 # CONFIGURATION SECTION
 # -------------------------------------------------
 config_model_selector()  # This sets model_name, model_mode, and api_key
+def load_test_artifacts(test_name: str):
+    base = os.path.join("artifacts", test_name)
+    result_path = os.path.join(base, "result.json")
+
+    result = None
+    screenshots = []
+
+    if os.path.exists(result_path):
+        with open(result_path, "r", encoding="utf-8") as f:
+            result = json.load(f)
+
+    if os.path.exists(base):
+        screenshots = sorted(
+            [
+                os.path.join(base, f)
+                for f in os.listdir(base)
+                if f.endswith(".png")
+            ]
+        )
+
+    return result, screenshots
+
 # Then safely use:
 api_key = st.session_state.get("api_key")
 mode = st.session_state.get("model_mode")
@@ -235,6 +257,8 @@ if st.session_state.get("current_step") == "code":
 # -------------------------------------------------
 # STEP 6: EXECUTION
 # -------------------------------------------------
+
+
 if st.session_state.get("current_step") == "verify":
     st.divider()
     st.subheader("6. Run Tests")
@@ -243,23 +267,62 @@ if st.session_state.get("current_step") == "verify":
     py_files = [f for f in files if f.endswith(".py")]
 
     for test_file in py_files:
-        with st.expander(f"▶️ {test_file}"):
+        test_name = test_file.replace("test_", "").replace(".py", "")
+
+        with st.expander(f"▶️ {test_file}", expanded=False):
             if st.button("Run", key=f"run_{test_file}"):
-                with st.spinner("Executing..."):
+                with st.spinner("Executing test..."):
                     try:
-                        result = subprocess.run([
-                            sys.executable, f"generated_tests/{test_file}"
-                        ], capture_output=True, text=True, timeout=20)
-
-                        if result.returncode == 0:
-                            st.success("✅ PASS")
-                            st.code(result.stdout)
-                        else:
-                            st.error("❌ FAIL")
-                            st.code(result.stderr)
-
+                        result = subprocess.run(
+                            [sys.executable, f"generated_tests/{test_file}"],
+                            capture_output=True,
+                            text=True,
+                            timeout=30
+                        )
                     except Exception as e:
                         st.error(f"Execution error: {e}")
+                        continue
+
+                # -----------------------------
+                # Load artifacts AFTER run
+                # -----------------------------
+                result_json, screenshots = load_test_artifacts(test_name)
+
+                if result_json:
+                    status = result_json.get("status")
+                    timestamp = result_json.get("timestamp")
+                    error_msg = result_json.get("error")
+
+                    if status == "PASS":
+                        st.success("✅ TEST PASSED")
+                    else:
+                        st.error("❌ TEST FAILED")
+
+                    st.caption(f"🕒 {timestamp}")
+
+                    if error_msg:
+                        st.code(error_msg, language="text")
+                else:
+                    st.warning("No result.json found")
+
+                # -----------------------------
+                # Screenshots timeline
+                # -----------------------------
+                if screenshots:
+                    st.markdown("### 📸 Execution Timeline")
+                    for img in screenshots:
+                        st.image(img, caption=os.path.basename(img))
+                else:
+                    st.info("No screenshots found")
+
+                # Raw logs
+                if result.stdout:
+                    st.markdown("### 📄 STDOUT")
+                    st.code(result.stdout)
+
+                if result.stderr:
+                    st.markdown("### ⚠️ STDERR")
+                    st.code(result.stderr)
 
 # -------------------------------------------------
 # RESET / CLEANUP
