@@ -302,3 +302,137 @@ class LLMBrain:
 
         except Exception as e:
             return [{"name": "Error Refining Plan", "description": str(e), "is_error": True}]
+
+    # Salma: Multipage Explorartion
+    def classify_navigation_candidate(
+        self,
+        page_snapshot: dict,
+        candidate: dict,
+        *,
+        journey_hint: str | None = None,
+        strict: bool = True,
+    ) -> dict:
+        """Classify whether a navigation candidate should be followed.
+
+        Supports multiple site types by allowing a journey_hint, e.g.:
+        - "signup" / "onboarding" (multi-step wizards)
+        - "ecommerce" (browse -> product -> add to cart -> cart -> checkout)
+
+        Returns a dict:
+        {
+          "follow": bool,
+          "confidence": float,
+          "category": "service_flow"|"out_of_scope"|"blocker"|"unclear",
+          "reason": str,
+          "suggested_phase": str
+        }
+        """
+
+        title = (page_snapshot or {}).get("title", "")
+        url = (page_snapshot or {}).get("url", "")
+        cleaned_dom = (page_snapshot or {}).get("cleaned_dom", "")
+
+        # Keep DOM very small; this is a classification task.
+        dom_snippet = (cleaned_dom or "")[:3000]
+
+        system_prompt = f"""
+You are an expert QA assistant deciding whether to follow a navigation action during fully-automatic main-path exploration.
+
+Your job:
+- Decide if the candidate is part of the MAIN SERVICE FLOW.
+- Skip out-of-scope informational pages (e.g. About, Blog, Careers, Contact, Terms, Privacy, Help, FAQ).
+
+This explorer supports two common journeys:
+1) SIGNUP / ONBOARDING WIZARD:
+   - Follow steps like Sign up / Register / Next / Continue / Submit / Finish.
+   - Skip unrelated navigation like About.
+2) ECOMMERCE MAIN PATH:
+   - Prefer a single end-to-end purchase flow:
+     Browse products -> open a product -> add to cart -> go to cart -> checkout.
+   - Skip unrelated informational navigation.
+   - Note: "Add to cart" may not change URL; it's still in-scope.
+
+STRICT MODE: {"ON" if strict else "OFF"}
+If STRICT MODE is ON and you are unsure, return follow=false and category="unclear".
+
+OUTPUT RULES:
+1) Output MUST be valid JSON object (not a list, not markdown).
+2) Schema:
+   {{
+     "follow": true|false,
+     "confidence": 0.0-1.0,
+     "category": "service_flow"|"out_of_scope"|"blocker"|"unclear",
+     "reason": "...",
+     "suggested_phase": "signup"|"browse"|"product"|"cart"|"checkout"|"unknown"
+   }}
+3) Be conservative about following nav/footer links.
+"""
+
+        user_prompt = f"""
+JOURNEY_HINT: {journey_hint or "auto"}
+
+CURRENT_PAGE:
+- title: {title}
+- url: {url}
+
+CANDIDATE:
+{json.dumps(candidate, ensure_ascii=False)}
+
+DOM_SNIPPET:
+{dom_snippet}
+"""
+
+        try:
+            response = ollama.chat(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                format="json",
+                options={"temperature": 0.1},
+            )
+            content = response["message"]["content"]
+            parsed = json.loads(content)
+
+            # Minimal validation + defaults.
+            follow = bool(parsed.get("follow", False))
+            confidence = parsed.get("confidence", 0.0)
+            try:
+                confidence = float(confidence)
+            except Exception:
+                confidence = 0.0
+            confidence = max(0.0, min(1.0, confidence))
+
+            category = parsed.get("category", "unclear")
+            if category not in {"service_flow", "out_of_scope", "blocker", "unclear"}:
+                category = "unclear"
+
+            suggested_phase = parsed.get("suggested_phase", "unknown")
+            if suggested_phase not in {"signup", "browse", "product", "cart", "checkout", "unknown"}:
+                suggested_phase = "unknown"
+
+            reason = parsed.get("reason", "")
+            if not isinstance(reason, str):
+                reason = ""
+
+            # Enforce strict-mode conservatism.
+            if strict and category == "unclear":
+                follow = False
+
+            return {
+                "follow": follow,
+                "confidence": confidence,
+                "category": category,
+                "reason": reason,
+                "suggested_phase": suggested_phase,
+            }
+
+        except Exception as e:
+            return {
+                "follow": False,
+                "confidence": 0.0,
+                "category": "unclear",
+                "reason": f"classifier_error: {str(e)}",
+                "suggested_phase": "unknown",
+            }

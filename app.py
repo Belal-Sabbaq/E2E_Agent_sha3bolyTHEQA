@@ -21,6 +21,14 @@ if "browser_manager" not in st.session_state:
 if "scraped_data" not in st.session_state:
     st.session_state.scraped_data = None
 
+# Salma: Multipage Explorartion
+if "brain" not in st.session_state:
+    st.session_state.brain = LLMBrain(model="qwen3:4b") # Make sure you have this model pulled!
+
+# Salma: Multipage Explorartion
+if "multipage_result" not in st.session_state:
+    st.session_state.multipage_result = None
+
 # # Initialize a state to track if we are editing the plan or filling data
 # if "plan_locked" not in st.session_state:
 #     st.session_state.plan_locked = False
@@ -61,10 +69,84 @@ with col1:
             screenshot = loop.run_until_complete(manager.capture_screenshot())
             st.session_state.current_screenshot = screenshot
 
+    # Salma: Multipage Explorartion
+    st.markdown("---")
+    st.caption("Multipage (Main Path) Exploration")
+    max_steps = st.number_input("Max steps", min_value=1, max_value=25, value=5, step=1, key="mp_max_steps")
+    journey_hint = st.selectbox(
+        "Journey type",
+        options=["auto", "signup", "ecommerce"],
+        index=0,
+        key="mp_journey_hint",
+    )
+    stop_on_input_required = st.checkbox(
+        "Stop when user input is required (checkpoint)",
+        value=True,
+        key="mp_stop_on_input",
+    )
+
+    # Salma: Multipage Explorartion
+    if st.button("Auto Explore Main Path"):
+        with st.spinner("Agent is exploring the main path..."):
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            manager = st.session_state.browser_manager
+            hint = None if journey_hint == "auto" else journey_hint
+
+            result = loop.run_until_complete(
+                manager.explore_main_path(
+                    url_input,
+                    brain=st.session_state.brain,
+                    max_steps=int(max_steps),
+                    journey_hint=hint,
+                    strict=True,
+                    stop_on_input_required=bool(stop_on_input_required),
+                )
+            )
+            st.session_state.multipage_result = result
+
+            checkpoint = (result or {}).get("checkpoint")
+            if checkpoint and isinstance(checkpoint, dict):
+                # Promote checkpoint page into the existing pipeline shape.
+                st.session_state.scraped_data = {
+                    "title": checkpoint.get("title"),
+                    "url": checkpoint.get("url"),
+                    "cleaned_dom": checkpoint.get("cleaned_dom"),
+                    "elements": checkpoint.get("elements", []),
+                }
+
+                # Reset design/execution state so Phase 2 starts clean.
+                st.session_state.test_plan = []
+                st.session_state.accepted_tests = []
+                st.session_state.plan_locked = False
+                st.session_state.pop("approved_tests", None)
+                st.session_state.pop("generated_code_map", None)
+                st.session_state.pop("current_step", None)
+
+            # Update screenshot to show the checkpoint page.
+            screenshot = loop.run_until_complete(manager.capture_screenshot())
+            st.session_state.current_screenshot = screenshot
+
+            st.rerun()
+
     # Display Results (The "Agent's Brain")
     if st.session_state.scraped_data:
         st.success(f"Analyzed: {st.session_state.scraped_data.get('title')}")
         st.json(st.session_state.scraped_data.get('elements'))
+
+        # Salma: Multipage Explorartion
+        if st.session_state.get("multipage_result"):
+            mp = st.session_state.multipage_result
+            visited_count = len((mp or {}).get("history") or [])
+            st.info(
+                f"Multipage result: visited={visited_count}, stop_reason={mp.get('stop_reason')}, stop_details={mp.get('stop_details')}"
+            )
+
+            with st.expander("Visited Pages (Main Path)", expanded=False):
+                for step in (mp.get("history") or []):
+                    meta = (step or {}).get("_meta") or {}
+                    st.write(f"Step {meta.get('step_index')}: {step.get('url')}")
 
 # RIGHT COLUMN: Visual Context
 with col2:
@@ -74,9 +156,10 @@ with col2:
     else:
         st.info("No active browser session.")
 
-
-if "brain" not in st.session_state:
-    st.session_state.brain = LLMBrain(model="qwen3:4b") # Make sure you have this model pulled!
+# Salma : Multipage Explorartion 
+# Commenting out to avoid re-initialization
+# if "brain" not in st.session_state:
+#     st.session_state.brain = LLMBrain(model="qwen3:4b") # Make sure you have this model pulled!
 
 # Initialize specific session states for granular control
 if "accepted_tests" not in st.session_state:
