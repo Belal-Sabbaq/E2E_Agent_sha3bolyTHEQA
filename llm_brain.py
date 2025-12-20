@@ -217,12 +217,69 @@ DOM: {clean_dom}
         print("🧠 Generating test plan...")
 
         try:
+<<<<<<< HEAD
             content = self.chat(system_prompt, user_prompt)
             content = content.replace("```json", "").replace("```", "").strip()
 
             json_text = self._extract_json_array(content)
             parsed_json = json.loads(json_text)
 
+=======
+            response = ollama.chat(
+                model=self.model, 
+                messages=[
+                    {'role': 'system', 'content': system_prompt},
+                    {'role': 'user', 'content': user_prompt},
+                ],
+                format='json',
+                options={'temperature': 0.1}
+            )
+            
+            content = response['message']['content']
+            print(f"DEBUG: Raw LLM Output: {content}") # Keep this for debugging
+            
+            parsed_json = json.loads(content)
+            
+            # --- FIX: ROBUST LIST EXTRACTION ---
+            final_plan = []
+            
+            # Case 1: It's already a list (Perfect)
+            if isinstance(parsed_json, list):
+                final_plan = parsed_json
+                
+# Case 2: It's a dict (single test object or wrapped response)
+            elif isinstance(parsed_json, dict):
+                # If it looks like a single test object, wrap it
+                if parsed_json.get("name") or parsed_json.get("description"):
+                    final_plan = [parsed_json]
+                    print("DEBUG: Parsed single test object; wrapped into list")
+                else:
+                    # Prefer lists of dicts (i.e., actual test arrays)
+                    found_list = False
+                    for key, value in parsed_json.items():
+                        if isinstance(value, list) and value and isinstance(value[0], dict):
+                            final_plan = value
+                            found_list = True
+                            print(f"DEBUG: Extracted plan from key: '{key}' (list of dicts)")
+                            break
+
+                    if not found_list:
+                        # Fallback: first list we find (but warn if it's a list of primitives)
+                        for key, value in parsed_json.items():
+                            if isinstance(value, list):
+                                final_plan = value
+                                found_list = True
+                                print(f"DEBUG: Extracted plan from key: '{key}' (fallback list)")
+                                break
+
+                    if not found_list:
+                        print("Error: JSON is a dict but contains no suitable lists.")
+                        return [{"name": "Error", "description": "LLM returned invalid format (Dict with no list).", "is_error": True}]
+            
+            
+            # --- VALIDATION LOOP ---
+            # Ensure every item has the required fields
+>>>>>>> 7b067e5d67bddb45dde3639fbd8d31a7f6460ee7
             safe_plan = []
             seen = set()
             for item in parsed_json:
@@ -257,6 +314,7 @@ DOM: {clean_dom}
         url = scraped_data.get("url") or scraped_data.get("final_url") or ""
         elements = scraped_data.get("elements", [])
         user_data = test_case.get("user_data", {})
+<<<<<<< HEAD
 
         test_name = test_case.get("name", "unnamed_test").strip()
         safe_test_name = (
@@ -313,6 +371,36 @@ DOM: {clean_dom}
     Replace values correctly based on the test.
     """
 
+=======
+        
+        system_prompt = """
+        You are an expert Playwright Automation Engineer (Python).
+        Your task: Write a complete, standalone Python script.
+
+        STRICT RULES:
+        1. IMPORTS: You MUST use exactly this import line:
+           from playwright.sync_api import sync_playwright
+        2. VIDEO: The script MUST create a browser context with video recording enabled
+           - Use: context = browser.new_context(record_video_dir="test_videos", record_video_size={"width":1280,"height":720})
+           - Use: page = context.new_page()
+           - After the test completes, close the page (page.close()) then copy the finalized video file
+             into the test artifacts folder (artifacts/<TEST_NAME>/video.webm) using shutil.copy2(page.video.path(), dst).
+        3. LOCATORS: Use resilient locators: page.get_by_role(), page.get_by_placeholder().
+        4. DATA: Use the provided USER_DATA values.
+        5. STRUCTURE:
+           - Define a run() function.
+           - Inside run(), use 'with sync_playwright() as p:'.
+           - Launch browser with headless=False.
+           - Create a context as specified above, and call 'page.set_default_timeout(5000)'.
+           - At the end, ensure context.close() and browser.close() are called.
+           - Call run() at the end under 'if __name__ == "__main__":'.
+        6. STATE MANAGEMENT (CRITICAL):
+           - If the test performed a login step and cookies should be preserved, save storage with:
+             context.storage_state(path='auth.json')
+        7. OUTPUT: Return ONLY the Python code (no markdown or explanations). Ensure code compiles.
+        """
+        
+>>>>>>> 7b067e5d67bddb45dde3639fbd8d31a7f6460ee7
         user_prompt = f"""
     TEST_NAME: {test_name}
     DESCRIPTION: {test_case.get("description", "")}
@@ -479,4 +567,181 @@ DOM: {clean_dom}
 
         return template
 
+<<<<<<< HEAD
     
+=======
+        print("🧠 Brain is refining the plan...")
+        try:
+            response = ollama.chat(
+                model=self.model, 
+                messages=[
+                    {'role': 'system', 'content': system_prompt},
+                    {'role': 'user', 'content': user_prompt},
+                ],
+                format='json',
+                options={'temperature': 0.2}
+            )
+            
+            content = response['message']['content']
+            parsed_json = json.loads(content)
+            
+            # (Reuse your robust list extraction logic here)
+            final_plan = []
+            if isinstance(parsed_json, list):
+                final_plan = parsed_json
+            elif isinstance(parsed_json, dict):
+                for val in parsed_json.values():
+                    if isinstance(val, list):
+                        final_plan = val
+                        break
+            
+            # Validation Loop
+            safe_plan = []
+            for item in final_plan:
+                safe_item = {
+                    "name": item.get("name", "Unnamed Test"),
+                    "description": item.get("description", ""),
+                    "missing_data": item.get("missing_data", []),
+                    "requires_auth": item.get("requires_auth", False)
+                }
+                safe_plan.append(safe_item)
+                
+            return safe_plan
+
+        except Exception as e:
+            return [{"name": "Error Refining Plan", "description": str(e), "is_error": True}]
+
+    # Salma: Multipage Explorartion
+    def classify_navigation_candidate(
+        self,
+        page_snapshot: dict,
+        candidate: dict,
+        *,
+        journey_hint: str | None = None,
+        strict: bool = True,
+    ) -> dict:
+        """Classify whether a navigation candidate should be followed.
+
+        Supports multiple site types by allowing a journey_hint, e.g.:
+        - "signup" / "onboarding" (multi-step wizards)
+        - "ecommerce" (browse -> product -> add to cart -> cart -> checkout)
+
+        Returns a dict:
+        {
+          "follow": bool,
+          "confidence": float,
+          "category": "service_flow"|"out_of_scope"|"blocker"|"unclear",
+          "reason": str,
+          "suggested_phase": str
+        }
+        """
+
+        title = (page_snapshot or {}).get("title", "")
+        url = (page_snapshot or {}).get("url", "")
+        cleaned_dom = (page_snapshot or {}).get("cleaned_dom", "")
+
+        # Keep DOM very small; this is a classification task.
+        dom_snippet = (cleaned_dom or "")[:3000]
+
+        system_prompt = f"""
+You are an expert QA assistant deciding whether to follow a navigation action during fully-automatic main-path exploration.
+
+Your job:
+- Decide if the candidate is part of the MAIN SERVICE FLOW.
+- Skip out-of-scope informational pages (e.g. About, Blog, Careers, Contact, Terms, Privacy, Help, FAQ).
+
+This explorer supports two common journeys:
+1) SIGNUP / ONBOARDING WIZARD:
+   - Follow steps like Sign up / Register / Next / Continue / Submit / Finish.
+   - Skip unrelated navigation like About.
+2) ECOMMERCE MAIN PATH:
+   - Prefer a single end-to-end purchase flow:
+     Browse products -> open a product -> add to cart -> go to cart -> checkout.
+   - Skip unrelated informational navigation.
+   - Note: "Add to cart" may not change URL; it's still in-scope.
+
+STRICT MODE: {"ON" if strict else "OFF"}
+If STRICT MODE is ON and you are unsure, return follow=false and category="unclear".
+
+OUTPUT RULES:
+1) Output MUST be valid JSON object (not a list, not markdown).
+2) Schema:
+   {{
+     "follow": true|false,
+     "confidence": 0.0-1.0,
+     "category": "service_flow"|"out_of_scope"|"blocker"|"unclear",
+     "reason": "...",
+     "suggested_phase": "signup"|"browse"|"product"|"cart"|"checkout"|"unknown"
+   }}
+3) Be conservative about following nav/footer links.
+"""
+
+        user_prompt = f"""
+JOURNEY_HINT: {journey_hint or "auto"}
+
+CURRENT_PAGE:
+- title: {title}
+- url: {url}
+
+CANDIDATE:
+{json.dumps(candidate, ensure_ascii=False)}
+
+DOM_SNIPPET:
+{dom_snippet}
+"""
+
+        try:
+            response = ollama.chat(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                format="json",
+                options={"temperature": 0.1},
+            )
+            content = response["message"]["content"]
+            parsed = json.loads(content)
+
+            # Minimal validation + defaults.
+            follow = bool(parsed.get("follow", False))
+            confidence = parsed.get("confidence", 0.0)
+            try:
+                confidence = float(confidence)
+            except Exception:
+                confidence = 0.0
+            confidence = max(0.0, min(1.0, confidence))
+
+            category = parsed.get("category", "unclear")
+            if category not in {"service_flow", "out_of_scope", "blocker", "unclear"}:
+                category = "unclear"
+
+            suggested_phase = parsed.get("suggested_phase", "unknown")
+            if suggested_phase not in {"signup", "browse", "product", "cart", "checkout", "unknown"}:
+                suggested_phase = "unknown"
+
+            reason = parsed.get("reason", "")
+            if not isinstance(reason, str):
+                reason = ""
+
+            # Enforce strict-mode conservatism.
+            if strict and category == "unclear":
+                follow = False
+
+            return {
+                "follow": follow,
+                "confidence": confidence,
+                "category": category,
+                "reason": reason,
+                "suggested_phase": suggested_phase,
+            }
+
+        except Exception as e:
+            return {
+                "follow": False,
+                "confidence": 0.0,
+                "category": "unclear",
+                "reason": f"classifier_error: {str(e)}",
+                "suggested_phase": "unknown",
+            }
+>>>>>>> 7b067e5d67bddb45dde3639fbd8d31a7f6460ee7
