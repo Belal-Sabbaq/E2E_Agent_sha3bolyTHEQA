@@ -6,3 +6,5 @@ auth.json
 
 # Generated test files
 generated_tests/
+
+test_videos/
