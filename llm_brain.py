@@ -53,11 +53,10 @@ class LLMBrain:
                 )
                 print("[LLM Config] Using GitHub Copilot backend")
             else:
-                # self.client = OpenAI(api_key=self.api_key)
-                print("[LLM Config] No API key found, falling back to Ollama")
+                print("[LLM Config] Using Ollama backend")
 
-        # else:
-        #     print("[LLM Config] No API key found, falling back to Ollama")
+        else:
+            print("[LLM Config] No API key found, falling back to Ollama")
    
     def chat(
     self,
