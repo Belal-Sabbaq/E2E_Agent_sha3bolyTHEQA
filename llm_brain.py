@@ -62,14 +62,14 @@ class LLMBrain:
 
         self.client = None
         self.metrics = []
-        self.llm_calls = 0  # ✅ FIX
+        self.llm_calls = 0 
 
         self.langfuse = Langfuse(
             public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
             secret_key=os.getenv("LANGFUSE_SECRET_KEY"),
             host=os.getenv("LANGFUSE_HOST")
         )
-
+        print("copilot: ",self.is_copilot)
         if self.api_key:
             if self.is_copilot:
                 self.client = OpenAI(
@@ -78,8 +78,8 @@ class LLMBrain:
                 )
                 print("[LLM Config] Using GitHub Copilot backend")
             else:
-                self.client = OpenAI(api_key=self.api_key)
-                print("[LLM Config] Using OpenAI backend")
+                print("[LLM Config] Using Ollama backend")
+
         else:
             print("[LLM Config] No API key found, falling back to Ollama")
    
@@ -133,7 +133,7 @@ class LLMBrain:
 
             else:
                 response = ollama.chat(
-                    model=self.model,
+                    model="freehuntx/qwen3-coder:8b",
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
@@ -240,23 +240,115 @@ class LLMBrain:
             if memory_context.get("emulate"):
                 memory_prompt += "\n\n✅ PATTERNS TO FOLLOW (Accepted previously):\n" + "\n".join(memory_context["emulate"])
         system_prompt = f"""
-        You are an expert QA Automation Engineer. 
-        Analyze the HTML and generate 3-5 Playwright test scenarios.
-        
-        CRITICAL RULES:
-        1. Output MUST be a valid JSON List of objects.
-        2. Format: [{{"name": "...", "description": "...", "missing_data": [], "requires_auth": false}}]
-        
-        DATA HANDLING RULES:
-        3. "missing_data" is for values the User must provide (e.g., valid_username).
-        4. NEGATIVE TESTING: If a test case requires a field to be EMPTY (e.g., "Login with empty password"), do NOT include that field in "missing_data".
-          - Correct: Name: "Empty Password", missing_data: ["username"] (Only ask for user, not password).
-          - Incorrect: Name: "Empty Password", missing_data: ["username", "password"].
-          
-        Lesson Learned: 
-        1. Output valid JSON list.
-        {memory_prompt}  <-- RAG INJECTION HERE
-        """
+You are a senior QA Automation Engineer specializing in Playwright E2E testing.
+
+Your task:
+Analyze the provided HTML/DOM and visible elements, then generate 3–5
+high-value end-to-end test scenarios that reflect realistic user behavior.
+
+The tests should focus on CORE USER FLOWS (e.g., login, signup, checkout,
+form submission, navigation, CRUD actions) — not trivial UI checks.
+
+========================
+🚨 OUTPUT RULES (STRICT)
+========================
+1. Output MUST be a valid JSON ARRAY only.
+2. Do NOT wrap in markdown. Do NOT add explanations.
+3. Each item MUST strictly follow this schema:
+
+[
+  {{
+    "name": string,
+    "description": string,
+    "missing_data": list[string],
+    "requires_auth": boolean
+  }}
+]
+
+4. No trailing commas. No comments. No extra fields.
+
+========================
+🧪 TEST QUALITY RULES
+========================
+5. Each test MUST:
+   - Be automatable using Playwright.
+   - Describe a full user journey (actions + assertions).
+   - Include at least one meaningful assertion
+     (URL change, success message, element visible, data updated, etc.).
+
+6. Prefer user-centric actions:
+   - click buttons/links
+   - fill inputs
+   - submit forms
+   - navigate pages
+   - verify results
+
+7. Avoid:
+   - “Page loads” only tests.
+   - Duplicate or overlapping scenarios.
+   - Pure UI style checks (colors, fonts).
+
+========================
+🔎 SELECTOR GUIDANCE
+========================
+8. When describing steps, prefer resilient selectors:
+   - get_by_role()
+   - get_by_label()
+   - get_by_text()
+   - get_by_placeholder()
+   over brittle CSS/XPath.
+
+========================
+📥 DATA HANDLING RULES
+========================
+9. "missing_data" is ONLY for values the user must provide later, such as:
+   - valid_username
+   - valid_password
+   - email
+   - product_name
+
+10. If a value is clearly available in the DOM (e.g., visible text, options),
+    do NOT ask for it in "missing_data".
+
+11. NEGATIVE TESTS:
+    If a field must be EMPTY, do NOT include it in missing_data.
+    Example:
+      Name: "Login with empty password"
+      missing_data: ["username"]
+
+========================
+🔐 AUTH RULES
+========================
+12. Set "requires_auth": true ONLY if:
+    - The test assumes the user is already logged in
+    - Or starts from an authenticated area (dashboard, profile, etc.)
+
+    Otherwise, false.
+
+========================
+🧠 REASONING RULES
+========================
+13. Base scenarios STRICTLY on:
+    - Provided DOM
+    - Elements list
+    - Page title
+
+14. Do NOT invent pages, features, or flows not implied by the content.
+
+15. If the page appears to be:
+    - Auth page → include login/validation flows.
+    - Product/listing → include browse/select/action flows.
+    - Form → include submit & validation flows.
+    - Dashboard → include core management actions.
+
+========================
+📚 LESSONS LEARNED (RAG)
+========================
+You MUST respect the following guidance from past feedback:
+{memory_prompt}
+
+Return ONLY the JSON array.
+"""
         
         user_prompt = f"""
         **Page Title:** {scraped_data.get('title')}
@@ -368,6 +460,14 @@ class LLMBrain:
            - If the test performed a login step and cookies should be preserved, save storage with:
              context.storage_state(path='auth.json')
         7. OUTPUT: Return ONLY the Python code (no markdown or explanations). Ensure code compiles.
+        8. ERROR CAPTURE: [CRITICAL]
+        - Wrap test steps in try/except.
+        - On exception:
+            * Save current page HTML using page.content() into:
+            artifacts/<TEST_NAME>/failure_dom.html
+            * Also save a screenshot to:
+            artifacts/<TEST_NAME>/failure.png
+            * Then re-raise the exception.
         """
         
         user_prompt = f"""
@@ -387,7 +487,7 @@ class LLMBrain:
                 response_format="json",
                 temperature=0.1
             )
-
+            print(f"DEBUG: Raw LLM Output: {content}") # Keep this for debugging
             code = content
 
             if "```python" in code:
@@ -399,29 +499,90 @@ class LLMBrain:
 
         except Exception as e:
             return f"# Error generating code: {str(e)}"
-    def fix_generated_code(self, broken_code, error_log):
+    def fix_generated_code(self, broken_code, error_log,dom=None):
         """
         Takes broken code and the error trace, then rewrites the code to fix it.
         """
         system_prompt = """
-        You are an expert Python Debugger for Playwright scripts.
-        Your task is to FIX the provided code based on the error output.
-        
-        RULES:
-        1. Analyze the ERROR TRACE to find the root cause (e.g., missing import, wrong locator, indentation).
-        2. Retain the original logic and USER_DATA. Do not hallucinate new data.
-        3. If the error is 'ModuleNotFoundError', fix the import statements.
-           (Correct: from playwright.sync_api import sync_playwright)
-        4. Return ONLY the fixed, executable Python code. No markdown, no explanations.
-        """
+            You are an expert Playwright self-healing agent and Python debugger.
+
+            Your task is to FIX the provided Playwright Python script using:
+            - the ERROR TRACE
+            - and the CURRENT PAGE DOM (if provided).
+
+            GOALS:
+            - Produce a corrected, executable script.
+            - Preserve the original test intent and logic.
+            - Make selectors resilient against UI changes.
+
+            RULES:
+
+            1. ROOT CAUSE ANALYSIS:
+            - Analyze the ERROR TRACE to identify the true cause:
+                syntax error, import error, runtime exception, timeout, missing element,
+                wrong locator, assertion failure, or flow issue.
+
+            2. CODE-LEVEL FIXES FIRST:
+            - Fix Python issues such as:
+                * Syntax/indentation errors
+                * NameError / AttributeError
+                * Missing or wrong imports
+            - If error is ModuleNotFoundError, ensure:
+                from playwright.sync_api import sync_playwright
+
+            3. UI / LOCATOR HEALING (when DOM is provided):
+            - If the error indicates element not found, strict mode violation, timeout,
+                or assertion mismatch:
+                * Inspect the CURRENT PAGE DOM.
+                * Identify the most likely replacement element.
+                * Update selectors to use resilient locators:
+                - page.get_by_role()
+                - page.get_by_text()
+                - page.get_by_placeholder()
+            - Prefer visible text, roles, labels, and placeholders from DOM.
+            - Avoid brittle selectors (CSS/XPath) unless absolutely necessary.
+
+            4. PRESERVE INTENT & DATA:
+            - Retain the original test flow and purpose.
+            - Do NOT change the test scenario logic.
+            - Do NOT hallucinate new steps or features.
+            - Keep all USER_DATA values unchanged.
+
+            5. MINIMAL, TARGETED CHANGES:
+            - Modify only what is necessary to fix the failure.
+            - Do not refactor unrelated parts of the script.
+
+            6. PLAYWRIGHT BEST PRACTICES:
+            - Ensure waits and actions are Playwright-safe.
+            - Prefer built-in auto-waiting over arbitrary sleeps.
+            - If needed, add small waits only to stabilize flaky steps.
+
+            7. OUTPUT FORMAT (STRICT):
+            - Return ONLY the fixed, executable Python code.
+            - No markdown.
+            - No explanations.
+            - No comments about what was changed.
+            - The code must compile and be runnable as-is.
+            8. ERROR CAPTURE: [CRITICAL]
+                - Wrap test steps in try/except.
+                - On exception:
+                    * Save current page HTML using page.content() into:
+                    artifacts/<TEST_NAME>/failure_dom.html
+                    * Also save a screenshot to:
+                    artifacts/<TEST_NAME>/failure.png
+                    * Then re-raise the exception.
+            """
         
         user_prompt = f"""
-        **BROKEN CODE:**
-        {broken_code}
-        
-        **ERROR TRACE:**
-        {error_log}
-        """
+            **BROKEN CODE:**
+            {broken_code}
+
+            **ERROR TRACE:**
+            {error_log}
+
+            **CURRENT PAGE DOM (after failure):**
+            {dom if dom else "N/A"}
+            """
 
         print("🚑 Healer Agent is fixing the code...")
         
@@ -545,8 +706,6 @@ class LLMBrain:
         dom_snippet = (cleaned_dom or "")[:3000]
 
         system_prompt = f"""
-You are an expert QA assistant deciding whether to follow a navigation action during fully-automatic main-path exploration.
-
 Your job:
 - Decide if the candidate is part of the MAIN SERVICE FLOW based on the journey type.
 - Skip obvious out-of-scope informational pages (e.g. About, Blog, Careers, Contact, Terms, Privacy, Help, FAQ).
@@ -592,13 +751,13 @@ OUTPUT RULES:
    - If on product details: "Add to Cart" gets 0.95+, other products get 0.5
    - If on cart: Checkout gets 0.95+, other phases get low scores
 """
-
         user_prompt = f"""
-JOURNEY_HINT: {journey_hint or "auto"}
+            **Current Page Title:** {title}
+            **Current Page URL:** {url}
+            **Current Page DOM Snippet:** {dom_snippet}
 
-CURRENT_PAGE:
-- title: {title}
-- url: {url}
+            **Candidate Action Details:**
+            {json.dumps(candidate)}
 
 CANDIDATE:
 {json.dumps(candidate, ensure_ascii=False)}
@@ -705,7 +864,6 @@ DOM_CONTEXT:
             "errors": errors,
             "per_model": per_model
         }
-
     # --------------------------------------------------
     # RESET METRICS
     # --------------------------------------------------

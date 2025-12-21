@@ -8,10 +8,23 @@ from llm_brain import LLMBrain
 import subprocess
 import sys
 import pandas as pd
+from ui_utils import config_model_selector
+
 
 
 # Fix for Playwright's async loop inside Streamlit
 nest_asyncio.apply()
+
+# ---- Auto cleanup on new Streamlit session ----
+if "initialized" not in st.session_state:
+    st.session_state.initialized = True
+
+    for folder in ["generated_tests", "test_videos", "artifacts"]:
+        if os.path.exists(folder):
+            try:
+                shutil.rmtree(folder)
+            except Exception as e:
+                print(f"Cleanup failed for {folder}: {e}")
 
 st.set_page_config(layout="wide", page_title="AI QA Agent")
 
@@ -38,7 +51,6 @@ if "multipage_result" not in st.session_state:
 #     st.session_state.accepted_tests = []
 # if "test_plan" not in st.session_state:
 #     st.session_state.test_plan = []
-
 def render_llm_metrics_sidebar(brain):
     st.sidebar.header("📊 LLM Metrics")
 
@@ -75,15 +87,53 @@ def render_llm_metrics_sidebar(brain):
         st.sidebar.info("No LLM calls yet.")
 
 
-if "brain" not in st.session_state:
-    st.session_state.brain = LLMBrain()
+# if "brain" not in st.session_state:
+#     st.session_state.brain = LLMBrain()
 
-render_llm_metrics_sidebar(st.session_state.brain)
+def render_sidebar():
+    # 1. Model selector (from ui_utils)
+    config_model_selector()
+    
+    current_config = (
+        st.session_state.model_mode,
+        st.session_state.model_name,
+        st.session_state.api_key,
+    )
+    previous_config = st.session_state.get("_llm_config")
+
+    if current_config != previous_config:
+        st.session_state._llm_config = current_config
+
+        st.session_state.brain = LLMBrain(
+            model=st.session_state.model_name,
+            api_key=st.session_state.api_key,
+            # is_copilot=st.session_state.model_mode == "API (Copilot)",
+        )
+
+        st.toast("🔄 LLM backend switched")
+        
+    st.sidebar.divider()
+
+    # 2. LLM metrics
+    render_llm_metrics_sidebar(st.session_state.brain)
+
+    st.sidebar.divider()
+
+    # 3. System status
+    st.sidebar.header("🖥️ System Status")
+    st.sidebar.metric(
+        "Status",
+        "Ready" if "llm_output" in st.session_state else "Idle"
+    )
+render_sidebar()
+
+
+#render_llm_metrics_sidebar(st.session_state.brain)
 
 # Sidebar
-with st.sidebar:
-    st.header("System Metrics")
-    st.metric("Status", "Ready" if "llm_output" in st.session_state else "Idle")
+# with st.sidebar:
+#     st.header("System Metrics")
+#     st.metric("Status", "Ready" if "llm_output" in st.session_state else "Idle")
 
 # Main output
 if "llm_output" in st.session_state:
@@ -600,47 +650,57 @@ if st.session_state.get("current_step") == "verification":
                                     key=f"next_url_{test_file}"
                                 )
                                 
-                                if col_next_2.button("🚀 Explore This URL", key=f"cont_{test_file}"):
-                                    if next_url:
-                                        # 1. Update the Target URL
-                                        st.session_state.url_input = next_url # Update input box
+                                # if col_next_2.button("🚀 Explore This URL", key=f"cont_{test_file}"):
+                                #     if next_url:
+                                #         # 1. Update the Target URL
+                                #         st.session_state.url_input = next_url # Update input box
                                         
-                                        # 2. Reset Pipeline States
-                                        st.session_state.scraped_data = None
-                                        st.session_state.test_plan = None
-                                        st.session_state.approved_tests = None
-                                        st.session_state.generated_code_map = {}
+                                #         # 2. Reset Pipeline States
+                                #         st.session_state.scraped_data = None
+                                #         st.session_state.test_plan = None
+                                #         st.session_state.approved_tests = None
+                                #         st.session_state.generated_code_map = {}
                                         
-                                        # 3. Trigger Exploration immediately
-                                        with st.spinner(f"Agent is analyzing {next_url} (with saved session)..."):
-                                            # The browser_manager will automatically pick up 'auth.json'
-                                            # because we implemented that check in start_browser()!
-                                            async def run_next_explore():
-                                                # Ensure browser is restarted to pick up new auth.json
-                                                await st.session_state.browser_manager.close() 
-                                                st.session_state.browser_manager = BrowserManager()
+                                #         # 3. Trigger Exploration immediately
+                                #         with st.spinner(f"Agent is analyzing {next_url} (with saved session)..."):
+                                #             # The browser_manager will automatically pick up 'auth.json'
+                                #             # because we implemented that check in start_browser()!
+                                #             async def run_next_explore():
+                                #                 # Ensure browser is restarted to pick up new auth.json
+                                #                 await st.session_state.browser_manager.close() 
+                                #                 st.session_state.browser_manager = BrowserManager()
                                                 
-                                                data = await st.session_state.browser_manager.explore_url(next_url)
-                                                screenshot = await st.session_state.browser_manager.capture_screenshot()
-                                                return data, screenshot
+                                #                 data = await st.session_state.browser_manager.explore_url(next_url)
+                                #                 screenshot = await st.session_state.browser_manager.capture_screenshot()
+                                #                 return data, screenshot
 
-                                            data, screenshot = asyncio.run(run_next_explore())
-                                            st.session_state.scraped_data = data
-                                            st.session_state.current_screenshot = screenshot
+                                #             data, screenshot = asyncio.run(run_next_explore())
+                                #             st.session_state.scraped_data = data
+                                #             st.session_state.current_screenshot = screenshot
                                             
-                                            # 4. Force Reset to Phase 2 (Design)
-                                            st.session_state.current_step = "design" # Or clear it to fall through
-                                            # Note: You might need to adjust your main if/else logic to handle this
-                                            # Easier way: Just clear everything and let the user see the new 'Exploration' result
-                                            del st.session_state["current_step"] 
-                                            st.rerun()
-                                    else:
-                                        st.warning("Please enter the URL you want to test next.")
+                                #             # 4. Force Reset to Phase 2 (Design)
+                                #             st.session_state.current_step = "design" # Or clear it to fall through
+                                #             # Note: You might need to adjust your main if/else logic to handle this
+                                #             # Easier way: Just clear everything and let the user see the new 'Exploration' result
+                                #             del st.session_state["current_step"] 
+                                #             st.rerun()
+                                #     else:
+                                #         st.warning("Please enter the URL you want to test next.")
                             else:               
                                 st.error("❌ TEST FAILED")
                                 st.text("Error Trace:")
                                 st.code(res.stderr, language="bash")
-                                
+                                dom = None
+                                art_dir = os.path.join("artifacts", test_file.replace("test_", "").replace(".py", ""))
+                                dom_path = os.path.join(art_dir, "failure_dom.html")
+
+                                if os.path.exists(dom_path):
+                                    try:
+                                        with open(dom_path, "r", encoding="utf-8") as f:
+                                            dom = f.read()[:30000]  # cap size
+                                        print("DEBUG: Loaded fresh DOM for healing.")
+                                    except Exception as e:
+                                        print("DEBUG: Could not read DOM:", e)
                                 # عرض الفيديو إن وُجد
                                 video_key = f"video_{test_file}"
                                 if video_key in st.session_state and st.session_state[video_key]:
@@ -679,7 +739,8 @@ if st.session_state.get("current_step") == "verification":
                                         # 2. Call the Healer
                                         fixed_code = st.session_state.brain.fix_generated_code(
                                             broken_code,
-                                            res.stderr
+                                            res.stderr,
+                                            dom
                                         )
 
                                         # 3. Overwrite the file
@@ -811,16 +872,21 @@ if st.session_state.get("current_step") == "verification":
             
             st.divider()
             if st.button("🔄 Start New Session (Reset)"):
-                # Clear state to loop back to Phase 1
+                # Clear session state
                 for key in list(st.session_state.keys()):
                     del st.session_state[key]
-
-                # Also remove generated tests directory to avoid stale files
-                if os.path.exists("generated_tests"):
+                if "browser_manager" in st.session_state:
                     try:
-                        shutil.rmtree("generated_tests")
-                    except Exception as e:
-                        print("DEBUG: Failed to remove generated_tests on reset:", e)
+                        asyncio.run(st.session_state.browser_manager.close())
+                    except:
+                        pass
+                # Remove generated folders
+                for folder in ["generated_tests", "test_videos", "artifacts"]:
+                    if os.path.exists(folder):
+                        try:
+                            shutil.rmtree(folder)
+                        except Exception as e:
+                            print(f"Failed to remove {folder}: {e}")
 
                 st.rerun()
 
