@@ -3,6 +3,7 @@ import json
 import re
 import os
 import time
+import numpy as np
 from langfuse import Langfuse
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -119,7 +120,10 @@ class LLMBrain:
                 tokens = response.get("eval_count", 0)
 
             content = normalize_llm_output(content)
-
+            if parse_matrix:
+                content = self._parse_matrix(content)
+            if to_numpy:
+                content = np.array(content)
             elapsed = time.time() - start_time
             self.metrics.append({
                 "model": self.model,
@@ -135,7 +139,22 @@ class LLMBrain:
                     usage={"total_tokens": tokens},
                     metadata={"latency_sec": elapsed}
                 )
+            
+            elapsed = time.time() - start_time
+            self.metrics.append({
+                "model": self.model,
+                "mode": "openai" if self.client else "ollama",
+                "time": elapsed,
+                "tokens": tokens,
+                "llm_calls": self.llm_calls
+            })
 
+            if generation:
+                generation.end(
+                    output=content,
+                    usage={"total_tokens": tokens},
+                    metadata={"latency_sec": elapsed}
+                )
             return content  # ✅ RETURN HERE
 
         except Exception as e:
@@ -153,7 +172,38 @@ class LLMBrain:
                 generation.end(error=str(e))
 
             raise RuntimeError(f"LLM call failed: {e}")
+    def _parse_matrix(self, content):
+        """
+        Converts LLM output to Python matrix (list of lists).
+        Accepts:
+        - list of lists (already parsed)
+        - stringified JSON matrix
+        - simple string with numbers separated by commas/spaces
+        """
+        if isinstance(content, list):
+            return content
+
+        if isinstance(content, str):
+            try:
+                # Try JSON parse first
+                parsed = content
+                if isinstance(parsed, list):
+                    return parsed
+            except json.JSONDecodeError:
+                # fallback: parse lines and numbers
+                lines = content.strip().splitlines()
+                matrix = []
+                for line in lines:
+                    # split by comma or space
+                    row = [float(x) for x in re.split(r"[,\s]+", line.strip()) if x]
+                    if row:
+                        matrix.append(row)
+                return matrix
+
+        # fallback: return as-is
+        return content
     
+
     def generate_test_plan(self, scraped_data,memory_context=None):
         elements = scraped_data.get("elements", [])
         clean_dom = scraped_data.get("cleaned_dom", "")[:10000] 

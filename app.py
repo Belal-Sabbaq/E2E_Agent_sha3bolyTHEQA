@@ -7,7 +7,7 @@ import shutil
 from llm_brain import LLMBrain
 import subprocess
 import sys
-
+import pandas as pd
 
 
 # Fix for Playwright's async loop inside Streamlit
@@ -39,21 +39,56 @@ if "multipage_result" not in st.session_state:
 # if "test_plan" not in st.session_state:
 #     st.session_state.test_plan = []
 
+def render_llm_metrics_sidebar(brain):
+    st.sidebar.header("📊 LLM Metrics")
+
+    summary = brain.get_metrics_summary()
+
+    col1, col2 = st.sidebar.columns(2)
+    col1.metric("LLM Calls", summary["total_calls"])
+    col2.metric("Total Tokens", summary["total_tokens"])
+
+    st.sidebar.metric(
+        "Avg Latency (s)",
+        f"{summary['average_time']:.3f}"
+    )
+
+    st.sidebar.metric("Errors", summary["errors"])
+
+    st.sidebar.divider()
+
+    if brain.metrics:
+        df = pd.DataFrame(brain.metrics)
+
+        st.sidebar.subheader("🔢 Per-Call Metrics")
+        st.sidebar.dataframe(
+            df[["llm_calls", "tokens", "time", "model", "mode"]],
+            use_container_width=True,
+            height=250
+        )
+
+        numeric = df[["llm_calls", "tokens", "time"]].to_numpy()
+
+        # st.sidebar.subheader("🧮 Metrics Matrix")
+        # st.sidebar.code(numeric, language="python")
+    else:
+        st.sidebar.info("No LLM calls yet.")
+
+
+if "brain" not in st.session_state:
+    st.session_state.brain = LLMBrain()
+
+render_llm_metrics_sidebar(st.session_state.brain)
 
 # Sidebar
 with st.sidebar:
     st.header("System Metrics")
     st.metric("Status", "Ready" if "llm_output" in st.session_state else "Idle")
-    st.metric("Tokens Used", st.session_state.get("tokens", 0))
-    st.metric("Latency (sec)", round(st.session_state.get("latency", 0.0), 3))
-    st.metric("LLM Calls", st.session_state.get("llm_calls", 0))
 
 # Main output
 if "llm_output" in st.session_state:
     st.subheader("Output")
     st.dataframe(st.session_state.llm_output)
-
-
 
 # --- MAIN LAYOUT ---
 st.title("🤖 Human-in-the-Loop Web Tester")
