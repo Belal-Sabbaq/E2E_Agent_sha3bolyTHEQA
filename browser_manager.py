@@ -154,6 +154,10 @@ class BrowserManager:
         }''')
 
         # Deduplicate in Python (common in nav menus with repeated items).
+        print(f"       [EXTRACT] Raw candidates from JS: {len(candidates or [])} items")
+        if candidates:
+            for i, c in enumerate(candidates[:3]):
+                print(f"         - {c.get('tag')}: {c.get('name', 'N/A')[:40]}")
         seen = set()
         unique = []
         for c in candidates or []:
@@ -170,6 +174,7 @@ class BrowserManager:
             if max_candidates and len(unique) >= max_candidates:
                 break
 
+        print(f"       [EXTRACT] After dedup: {len(unique)} unique candidates")
         return unique
 
     # Salma: Multipage Explorartion
@@ -182,6 +187,8 @@ class BrowserManager:
         """
         if not self.page:
             await self.start_browser()
+
+        print(f"       [INPUT] Detecting required user input fields...")
 
         fields = await self.page.evaluate('''() => {
             const out = [];
@@ -245,9 +252,10 @@ class BrowserManager:
                     return;
                 }
 
-                // We consider it "needs input" if there exists at least one required field
-                // that is currently empty.
-                if (required && !value) {
+                // We consider it "needs input" if ANY input field is empty.
+                // This catches login pages that don't explicitly mark inputs as required.
+                // We'll report ANY visible input field as needing attention.
+                if (!value) {
                     out.push({
                         tag,
                         type,
@@ -265,7 +273,9 @@ class BrowserManager:
         }''')
 
         if not fields:
+            print(f"       [INPUT] ✅ No empty input fields found")
             return []
+        print(f"       [INPUT] ✅ Found {len(fields)} empty input field(s) needing data: {[f.get('name_attr', f.get('id_attr', 'unknown')) for f in fields[:3]]}")
         return fields[:max_fields]
 
     # Salma: Multipage Explorartion
@@ -420,18 +430,26 @@ class BrowserManager:
                 print("DEBUG: Failed to create persistence directory:", e)
 
         current_url = start_url
+        print(f"🚀 [MULTIPAGE] Starting exploration at {start_url}")
 
         completed_all_steps = True
         for step_index in range(max_steps):
+            print(f"\n📍 [STEP {step_index}] Starting step (max_steps={max_steps})")
+            print(f"   Current URL: {current_url}")
             try:
+                print(f"   [GOTO] Navigating to {current_url}...")
                 await self.page.goto(current_url)
+                print(f"   [GOTO] ✅ Navigation complete")
             except Exception as e:
+                print(f"   [GOTO] ❌ Navigation failed: {e}")
                 stop_reason = 'navigation_error'
                 stop_details = str(e)
                 completed_all_steps = False
                 break
 
+            print(f"   [SNAPSHOT] Capturing page snapshot...")
             snapshot = await self.snapshot_current_page(include_raw_html=False)
+            print(f"   [SNAPSHOT] ✅ Title: {snapshot.get('title')}")
             snapshot_meta = {
                 'step_index': step_index,
                 'decision': None,
@@ -447,8 +465,11 @@ class BrowserManager:
             visited.add(canonical)
 
             # Checkpoint behavior: stop on required input.
+            print(f"   [CHECKPOINT] Checking for empty input fields that need to be filled...")
             required_fields = await self.detect_required_user_input()
+            print(f"   [CHECKPOINT] Found {len(required_fields)} empty input field(s). stop_on_input_required={stop_on_input_required}")
             if stop_on_input_required and required_fields:
+                print(f"   [CHECKPOINT] ✅ STOPPING - User input is required to proceed")
                 snapshot_meta['stop_reason'] = 'requires_input'
                 snapshot_meta['required_fields'] = required_fields
                 history.append({**snapshot, '_meta': snapshot_meta})
@@ -458,19 +479,30 @@ class BrowserManager:
                 break
 
             # Extract candidates and classify.
+            print(f"   [CANDIDATES] Extracting navigation candidates (max={max_candidates})...")
             candidates = await self.extract_navigation_candidates(max_candidates=max_candidates)
+            print(f"   [CANDIDATES] ✅ Found {len(candidates)} candidates")
 
             scored = []
-            for cand in candidates:
-                decision = brain.classify_navigation_candidate(
+            print(f"   [CLASSIFY] Starting classification of {len(candidates)} candidates...")
+            for i, cand in enumerate(candidates):
+                cand_name = cand.get('name', 'N/A')
+                print(f"     [CLASSIFY] Candidate {i+1}/{len(candidates)}: {cand_name}...")
+                decision = await brain.classify_navigation_candidate(
                     snapshot,
                     cand,
                     journey_hint=journey_hint,
                     strict=strict,
                 )
+                follow = decision.get('follow')
+                category = decision.get('category', 'unknown')
+                print(f"     [CLASSIFY] ✅ Result: follow={follow}, category={category}")
                 if decision.get('follow') is True:
-                    scored.append((self._score_candidate(cand), cand, decision))
+                    score = self._score_candidate(cand)
+                    print(f"     [CLASSIFY]   → Scoring: {score}")
+                    scored.append((score, cand, decision))
 
+            print(f"   [CLASSIFY] ✅ Classification complete. Scored {len(scored)} candidates to follow")
             if not scored:
                 snapshot_meta['stop_reason'] = 'no_follow_action'
                 history.append({**snapshot, '_meta': snapshot_meta})
@@ -481,6 +513,8 @@ class BrowserManager:
 
             scored.sort(key=lambda t: t[0], reverse=True)
             best_score, best_candidate, best_decision = scored[0]
+            best_name = best_candidate.get('name', 'N/A')
+            print(f"   [SELECT] Best candidate (score={best_score}): {best_name}")
             snapshot_meta['decision'] = {
                 'candidate': best_candidate,
                 'classifier': best_decision,
@@ -491,25 +525,33 @@ class BrowserManager:
             # Try to navigate and determine progress.
             before_url = snapshot.get('url', '')
             before_dom = snapshot.get('cleaned_dom', '')
+            print(f"   [NAVIGATE] Executing action: {best_name}...")
             try:
+                print(f"   [NAVIGATE] Clicking/navigating...")
                 await self._navigate_via_candidate(before_url or current_url, best_candidate)
+                print(f"   [NAVIGATE] Action executed, waiting for page load...")
                 # Allow both navigations and AJAX-type changes.
                 await self.page.wait_for_load_state('domcontentloaded')
+                print(f"   [NAVIGATE] ✅ Page loaded")
             except Exception as e:
+                print(f"   [NAVIGATE] ❌ Action failed: {e}")
                 stop_reason = 'action_failed'
                 stop_details = str(e)
                 completed_all_steps = False
                 break
 
+            print(f"   [PROGRESS] Taking after-snapshot to check progress...")
             after_snapshot = await self.snapshot_current_page(include_raw_html=False)
             after_url = after_snapshot.get('url', '')
             after_dom = after_snapshot.get('cleaned_dom', '')
 
             url_changed = self._canonicalize_url(after_url) != self._canonicalize_url(before_url)
             dom_changed = (after_dom or '') != (before_dom or '')
+            print(f"   [PROGRESS] URL changed: {url_changed}, DOM changed: {dom_changed}")
 
             if not url_changed and not dom_changed:
                 # No observable progress; stop at the current page.
+                print(f"   [PROGRESS] ❌ No progress detected (no URL or DOM change)")
                 stop_reason = 'no_progress'
                 stop_details = best_candidate
                 completed_all_steps = False
@@ -517,6 +559,9 @@ class BrowserManager:
 
             # Continue from the new URL (even if dom change only, keep current URL).
             current_url = after_url or before_url or current_url
+            print(f"   [PROGRESS] ✅ Step {step_index} complete. Next URL: {current_url}")
+            print(f"   Waiting before next step...")
+            await asyncio.sleep(0.5)  # Small delay to prevent overwhelming browser
 
             # Persist step snapshot (best-effort) without screenshot bytes.
             if run_dir:
@@ -533,7 +578,11 @@ class BrowserManager:
 
         if completed_all_steps and stop_reason is None:
             stop_reason = 'max_steps_reached'
+            print(f"\n🏁 [MULTIPAGE] Exploration complete. Reached max steps.")
+        else:
+            print(f"\n🏁 [MULTIPAGE] Exploration stopped. Reason: {stop_reason}")
 
+        print(f"📊 [MULTIPAGE] Summary: visited {len(history)} pages")
         checkpoint = history[-1] if history else None
         result = {
             'history': history,

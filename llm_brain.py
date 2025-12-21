@@ -1,3 +1,4 @@
+import asyncio
 import ollama
 import json
 import re
@@ -10,18 +11,42 @@ from dotenv import load_dotenv
 load_dotenv()
 def normalize_llm_output(content):
     """
-    Ensures LLM output is returned as a Python list of dicts.
+    Ensures LLM output is returned as a Python list of dicts or dict.
     Accepts:
       - JSON string
-      - already-parsed list
+      - already-parsed list/dict
+    Handles malformed JSON by attempting cleanup.
     """
-    if isinstance(content, list):
+    if isinstance(content, (list, dict)):
         # Already parsed
         return content
 
     if isinstance(content, str):
         content = content.strip()
-        return json.loads(content)
+        # Try to parse as-is first
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            # Attempt to fix common JSON issues
+            # Remove trailing commas before }, ]
+            cleaned = content.replace(",}", "}").replace(",]", "]")
+            # If response has markdown code blocks, extract JSON
+            if "```" in cleaned:
+                match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', cleaned)
+                if match:
+                    cleaned = match.group(1)
+            try:
+                return json.loads(cleaned)
+            except json.JSONDecodeError as e:
+                # Last resort: try to extract first valid JSON object
+                import re
+                json_match = re.search(r'\{[^{}]*\}', cleaned)
+                if json_match:
+                    try:
+                        return json.loads(json_match.group(0))
+                    except:
+                        pass
+                raise ValueError(f"Cannot parse JSON response: {str(e)}\nContent: {content[:200]}")
 
     raise TypeError(f"Unsupported LLM output type: {type(content)}")
 class LLMBrain:
@@ -488,7 +513,7 @@ class LLMBrain:
         except Exception as e:
             return [{"name": "Error Refining Plan", "description": str(e), "is_error": True}]
     # Salma: Multipage Explorartion
-    def classify_navigation_candidate(
+    async def classify_navigation_candidate(
         self,
         page_snapshot: dict,
         candidate: dict,
@@ -523,24 +548,31 @@ class LLMBrain:
 You are an expert QA assistant deciding whether to follow a navigation action during fully-automatic main-path exploration.
 
 Your job:
-- Decide if the candidate is part of the MAIN SERVICE FLOW.
-- Skip out-of-scope informational pages (e.g. About, Blog, Careers, Contact, Terms, Privacy, Help, FAQ).
+- Decide if the candidate is part of the MAIN SERVICE FLOW based on the journey type.
+- Skip obvious out-of-scope informational pages (e.g. About, Blog, Careers, Contact, Terms, Privacy, Help, FAQ).
+- Be CONFIDENT in your decisions - if a link could plausibly be part of the main flow, rate it as such.
 
-This explorer supports two common journeys:
+JOURNEY TYPE: {journey_hint or "auto"}
+
+Based on journey type, here's what counts as "main service flow":
 1) SIGNUP / ONBOARDING WIZARD:
-   - Follow steps like Sign up / Register / Next / Continue / Submit / Finish.
-   - Skip unrelated navigation like About.
+   - Follow steps: Sign up / Register / Next / Continue / Submit / Finish / Create Account
+   - Skip: About, Blog, Careers, Contact, Terms, Privacy, Help, FAQ
 2) ECOMMERCE MAIN PATH:
-   - Prefer a single end-to-end purchase flow:
-     Browse products -> open a product -> add to cart -> go to cart -> checkout.
-   - Skip unrelated informational navigation.
-   - Note: "Add to cart" may not change URL; it's still in-scope.
-
-STRICT MODE: {"ON" if strict else "OFF"}
-If STRICT MODE is ON and you are unsure, return follow=false and category="unclear".
+   - CRITICAL SEQUENCE (must follow in this order):
+     A) BROWSE PHASE (start here): Products / Shop / Browse / Catalog
+     B) PRODUCT PHASE: Product Details / View Product / Item Page (only if you're on Products/Browse page)
+     C) CART PHASE: Add to Cart (only after viewing a product) → View Cart / My Cart
+     D) CHECKOUT PHASE: Checkout / Place Order / Payment
+   - Skip informational pages: About, Blog, Careers, Contact, Terms, Privacy, Help, FAQ, Reviews, Testimonials
+   - IMPORTANT: On home/landing page, prefer Products/Shop BEFORE Cart. Cart is only relevant after adding items.
+   - Strategy: Products → Product Details → Add to Cart → Cart → Checkout
+   
+3) AUTO (detect from context):
+   - Analyze page context and candidate name to guess the likely flow type
 
 OUTPUT RULES:
-1) Output MUST be valid JSON object (not a list, not markdown).
+1) Output MUST be valid JSON object (not a list, not markdown). NO trailing commas, NO markdown code blocks.
 2) Schema:
    {{
      "follow": true|false,
@@ -549,7 +581,16 @@ OUTPUT RULES:
      "reason": "...",
      "suggested_phase": "signup"|"browse"|"product"|"cart"|"checkout"|"unknown"
    }}
-3) Be conservative about following nav/footer links.
+3) CONFIDENCE GUIDANCE:
+   - High (0.8+): This link clearly belongs in the main flow at current position
+   - Medium (0.5-0.8): This link might be part of the flow, needs context
+   - Low (0.2-0.5): This link is probably not part of the flow
+   - Unclear: Can't determine even with context
+4) PHASE STRATEGY FOR ECOMMERCE:
+   - If on home/landing page: Products gets confidence 0.95+, Cart gets 0.5
+   - If on products listing: Product links get 0.9+, Cart gets 0.3 (nothing in cart yet)
+   - If on product details: "Add to Cart" gets 0.95+, other products get 0.5
+   - If on cart: Checkout gets 0.95+, other phases get low scores
 """
 
         user_prompt = f"""
@@ -562,20 +603,30 @@ CURRENT_PAGE:
 CANDIDATE:
 {json.dumps(candidate, ensure_ascii=False)}
 
-DOM_SNIPPET:
+DOM_CONTEXT:
 {dom_snippet}
 """
 
         try:
-            content = self.chat(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                response_format="json",
-                temperature=0.1
+            candidate_name = (candidate.get('name') or 'unknown')[:30]
+            print(f"       [LLM] Classifying candidate: {candidate_name}...")
+            # Run blocking chat call in executor to avoid blocking event loop
+            loop = asyncio.get_event_loop()
+            print(f"       [LLM] Submitting to executor...")
+            content = await loop.run_in_executor(
+                None,
+                lambda: self.chat(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    response_format="json",
+                    temperature=0.1
+                )
             )
+            print(f"       [LLM] ✅ LLM response received")
 
             parsed = content
-
+            print(f"\n>>> [DEBUG_RAW] {type(parsed)} = {str(parsed)[:500]}\n")
+            print(f"       [LLM] RAW RESPONSE: follow={parsed.get('follow')}, category={parsed.get('category')}, confidence={parsed.get('confidence')}, reason={parsed.get('reason', '')[:80]}")
 
             # Minimal validation + defaults.
             follow = bool(parsed.get("follow", False))
@@ -598,10 +649,12 @@ DOM_SNIPPET:
             if not isinstance(reason, str):
                 reason = ""
 
-            # Enforce strict-mode conservatism.
-            if strict and category == "unclear":
+            # Enforce strict-mode conservatism: only filter out LOW-confidence unclear results.
+            # High-confidence unclear (e.g. confidence >= 0.6) still means "unsure but could be valid"
+            if strict and category == "unclear" and confidence < 0.6:
                 follow = False
 
+            print(f"       [LLM] Classification result: follow={follow}, category={category}, confidence={confidence:.2f}")
             return {
                 "follow": follow,
                 "confidence": confidence,
@@ -611,6 +664,7 @@ DOM_SNIPPET:
             }
 
         except Exception as e:
+            print(f"       [LLM] ⚠️ Classification error: {type(e).__name__}: {str(e)[:80]}")
             return {
                 "follow": False,
                 "confidence": 0.0,
