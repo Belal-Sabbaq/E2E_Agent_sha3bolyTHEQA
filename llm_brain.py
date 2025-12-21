@@ -343,6 +343,14 @@ class LLMBrain:
            - If the test performed a login step and cookies should be preserved, save storage with:
              context.storage_state(path='auth.json')
         7. OUTPUT: Return ONLY the Python code (no markdown or explanations). Ensure code compiles.
+        8. ERROR CAPTURE: [CRITICAL]
+        - Wrap test steps in try/except.
+        - On exception:
+            * Save current page HTML using page.content() into:
+            artifacts/<TEST_NAME>/failure_dom.html
+            * Also save a screenshot to:
+            artifacts/<TEST_NAME>/failure.png
+            * Then re-raise the exception.
         """
         
         user_prompt = f"""
@@ -374,29 +382,90 @@ class LLMBrain:
 
         except Exception as e:
             return f"# Error generating code: {str(e)}"
-    def fix_generated_code(self, broken_code, error_log):
+    def fix_generated_code(self, broken_code, error_log,dom=None):
         """
         Takes broken code and the error trace, then rewrites the code to fix it.
         """
         system_prompt = """
-        You are an expert Python Debugger for Playwright scripts.
-        Your task is to FIX the provided code based on the error output.
-        
-        RULES:
-        1. Analyze the ERROR TRACE to find the root cause (e.g., missing import, wrong locator, indentation).
-        2. Retain the original logic and USER_DATA. Do not hallucinate new data.
-        3. If the error is 'ModuleNotFoundError', fix the import statements.
-           (Correct: from playwright.sync_api import sync_playwright)
-        4. Return ONLY the fixed, executable Python code. No markdown, no explanations.
-        """
+            You are an expert Playwright self-healing agent and Python debugger.
+
+            Your task is to FIX the provided Playwright Python script using:
+            - the ERROR TRACE
+            - and the CURRENT PAGE DOM (if provided).
+
+            GOALS:
+            - Produce a corrected, executable script.
+            - Preserve the original test intent and logic.
+            - Make selectors resilient against UI changes.
+
+            RULES:
+
+            1. ROOT CAUSE ANALYSIS:
+            - Analyze the ERROR TRACE to identify the true cause:
+                syntax error, import error, runtime exception, timeout, missing element,
+                wrong locator, assertion failure, or flow issue.
+
+            2. CODE-LEVEL FIXES FIRST:
+            - Fix Python issues such as:
+                * Syntax/indentation errors
+                * NameError / AttributeError
+                * Missing or wrong imports
+            - If error is ModuleNotFoundError, ensure:
+                from playwright.sync_api import sync_playwright
+
+            3. UI / LOCATOR HEALING (when DOM is provided):
+            - If the error indicates element not found, strict mode violation, timeout,
+                or assertion mismatch:
+                * Inspect the CURRENT PAGE DOM.
+                * Identify the most likely replacement element.
+                * Update selectors to use resilient locators:
+                - page.get_by_role()
+                - page.get_by_text()
+                - page.get_by_placeholder()
+            - Prefer visible text, roles, labels, and placeholders from DOM.
+            - Avoid brittle selectors (CSS/XPath) unless absolutely necessary.
+
+            4. PRESERVE INTENT & DATA:
+            - Retain the original test flow and purpose.
+            - Do NOT change the test scenario logic.
+            - Do NOT hallucinate new steps or features.
+            - Keep all USER_DATA values unchanged.
+
+            5. MINIMAL, TARGETED CHANGES:
+            - Modify only what is necessary to fix the failure.
+            - Do not refactor unrelated parts of the script.
+
+            6. PLAYWRIGHT BEST PRACTICES:
+            - Ensure waits and actions are Playwright-safe.
+            - Prefer built-in auto-waiting over arbitrary sleeps.
+            - If needed, add small waits only to stabilize flaky steps.
+
+            7. OUTPUT FORMAT (STRICT):
+            - Return ONLY the fixed, executable Python code.
+            - No markdown.
+            - No explanations.
+            - No comments about what was changed.
+            - The code must compile and be runnable as-is.
+            8. ERROR CAPTURE: [CRITICAL]
+                - Wrap test steps in try/except.
+                - On exception:
+                    * Save current page HTML using page.content() into:
+                    artifacts/<TEST_NAME>/failure_dom.html
+                    * Also save a screenshot to:
+                    artifacts/<TEST_NAME>/failure.png
+                    * Then re-raise the exception.
+            """
         
         user_prompt = f"""
-        **BROKEN CODE:**
-        {broken_code}
-        
-        **ERROR TRACE:**
-        {error_log}
-        """
+            **BROKEN CODE:**
+            {broken_code}
+
+            **ERROR TRACE:**
+            {error_log}
+
+            **CURRENT PAGE DOM (after failure):**
+            {dom if dom else "N/A"}
+            """
 
         print("🚑 Healer Agent is fixing the code...")
         
