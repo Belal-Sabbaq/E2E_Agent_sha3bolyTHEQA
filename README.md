@@ -2,7 +2,7 @@
 
 An intelligent software testing framework that leverages Generative AI to automate website testing for both single-page and multi-page applications.
 
-![Dashboard Preview](D:\GEN_AI\E2E_Agent_sha3bolyTHEQA\image.png)
+![Dashboard Preview](image.png)
 
 ## ✨ Features
 - **GenAI Automation:** Intelligent navigation and element discovery.
