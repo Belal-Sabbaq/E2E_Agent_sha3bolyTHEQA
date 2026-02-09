@@ -7,5 +7,6 @@ auth.json
 *.pyc
 # Generated test files
 generated_tests/
-
+artifacts/
 test_videos/
+__pycache__/
